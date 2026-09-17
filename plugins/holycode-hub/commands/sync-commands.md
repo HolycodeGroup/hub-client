@@ -1,0 +1,8 @@
+---
+description: Download the framework commands and rules into the plugin without claiming a story — then restart Claude Code to register them
+---
+1. Build `command_cache`: if `${CLAUDE_PLUGIN_ROOT}/commands-cache/.manifest.json` exists, take its parsed contents verbatim, else omit it. Build `rule_cache`: if `${CLAUDE_PLUGIN_ROOT}/rules-cache/.manifest.json` exists, take its parsed contents verbatim (hashes only — never text, never a `project` key), else omit it.
+2. Call the `work_sync` tool on the `holycode-hub` MCP server exactly once with `{ "command_cache": <that object, when present>, "rule_cache": <that object, when present> }`. No project id and no story id are needed.
+3. Pipe the JSON of `result.command_deltas` into `node "${CLAUDE_PLUGIN_ROOT}/scripts/apply-command-deltas.mjs"` (stdin) and report its one-line summary; a non-zero exit means a card was refused — report it, never work around it.
+4. Pipe the JSON of `result.rule_deltas` into `node "${CLAUDE_PLUGIN_ROOT}/scripts/apply-rule-deltas.mjs"` (stdin) and report its one-line summary; a non-zero exit means a delta was refused — report it, never work around it.
+5. Tell the user the framework command cards now live in the plugin's `commands-cache/` and the framework rules in `rules-cache/`, and that they must RESTART Claude Code for the new commands to appear (Claude Code registers plugin commands at session start). Make no further Hub calls for this step.
