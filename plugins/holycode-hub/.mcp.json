@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "holycode-hub": {
+      "type": "http",
+      "url": "https://rd-hub-app-production.up.railway.app/mcp"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "holycode-hub",
+  "owner": {
+    "name": "Holycode",
+    "url": "https://holycode.com"
+  },
+  "description": "The Holycode Hub client — Rapid Delivery framework commands over the Hub MCP server.",
+  "plugins": [
+    {
+      "name": "holycode-hub",
+      "source": "./plugins/holycode-hub",
+      "description": "Thin command stubs + rule/command sync over the Hub MCP server. No method is installed — the licensed OAuth credential is the value."
+    }
+  ]
+}

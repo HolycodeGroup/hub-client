@@ -1,0 +1,5 @@
+# The command-card cache is populated at RUNTIME on the licensee machine by
+# scripts/apply-command-deltas.mjs — never committed, never shipped.
+*
+!README.md
+!.gitignore
