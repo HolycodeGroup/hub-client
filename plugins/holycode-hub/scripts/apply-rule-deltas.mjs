@@ -1,35 +1,30 @@
 #!/usr/bin/env node
-// Holycode Hub — apply rule deltas (US-018 framework tier, US-019 project tier).
+// Holycode Hub — apply rule deltas (US-019 PROJECT tier; the US-018 framework
+// tier was WITHDRAWN by US-044 — no framework rule file ever lands on a
+// developer machine any more, and this script writes no framework cache).
 // Node >= 20, ESM, ZERO dependencies.
 //
-// Usage:  node apply-rule-deltas.mjs [--cache <dir>] [--project-root <dir>] < deltas.json
-//   stdin = the `rule_deltas` object from a work_claim result, or the whole
-//   result (`.directive.rule_deltas` is picked). Default cache dir:
-//   ${CLAUDE_PLUGIN_ROOT}/rules-cache, else ../rules-cache next to this script.
-//   Default project root: the current working directory (the customer repo).
-//
-// FRAMEWORK tier (US-018) — owns `rules-cache/.manifest.json`, written in
-// EXACTLY the work_claim `rule_cache` request shape — { manifest_sha256,
-// files: { path: sha256 } }, hashes only — so the /hub:claim stub passes it
-// through verbatim next time.
+// Usage:  node apply-rule-deltas.mjs [--project-root <dir>] < deltas.json
+//   stdin = the `rule_deltas` object from a work_claim result ({ project }),
+//   or the whole result (`.directive.rule_deltas` is picked). Default project
+//   root: the current working directory (the customer repo). Legacy framework
+//   keys (`manifest_sha256`, `changed`, `removed` at the top level — sent by
+//   servers/plugins predating US-044) are IGNORED: only the project tier is
+//   applied.
 //
 // PROJECT tier (US-019) — `rule_deltas.project` = { changed: [{ path, version,
 // sha256, body }], removed: [path] } lands in the CUSTOMER REPO's
 // `.project-management/rules/` under --project-root (these are the project's
-// own files, the reverse direction of the plugin cache), tracked in
+// own files — customer property), tracked in
 // `.project-management/rules/.versions.json`:
 //   { "<path>": { "version": n, "sha256": "<sha256 of the body as written>" } }
-// The work_claim `rule_cache.project` map is that file mapped to path → version:
-//   Object.fromEntries(Object.entries(versions).map(([p, v]) => [p, v.version]))
-// (the /hub:claim stub does exactly that; /hub:sync sends `version` back as
-// `base_version` and records the { version, sha256 } project_sync returns).
+// The work_claim `rule_cache` request is that file mapped to
+// `{ "project": { "<path>": <version> } }` — versions only, never text or
+// hashes (the /hub:claim stub does exactly that; /hub:sync sends `version`
+// back as `base_version` and records the { version, sha256 } project_sync
+// returns).
 //
 // Invariants (tested in __tests__/apply-rule-deltas.test.ts):
-//   - a framework delta path must match the flat canon shape AND resolve inside
-//     the cache root, else it is REFUSED (counted, exit 1, nothing written);
-//   - a cached framework file whose CURRENT sha256 differs from the last
-//     delivered one is a LOCAL EDIT: moved to overrides/<name>.local.md (-2,
-//     -3, ... never overwriting) BEFORE the canon body lands or the file is removed;
 //   - a project delta path must be `.project-management/rules/<flat name>.md`
 //     AND resolve inside that directory under the project root, and its sha256
 //     must be the sha256 of its body — else REFUSED (nothing written);
@@ -38,27 +33,16 @@
 //     listed under `project.conflicts`, exit 1 — the user runs /hub:sync first;
 //   - a `project.removed` path only DROPS the `.versions.json` record — a
 //     customer file is never deleted by this script (v1 has no delete);
-//   - NEVER a network call; prints one JSON line { written, removed, promoted,
-//     refused, project?: { written, dropped, refused, conflicts: [path] } } —
-//     the `project` key appears only when the input carried a project tier.
+//   - NEVER a network call; prints one JSON line
+//     { project: { written, dropped, refused, conflicts: [path] } }.
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const RULE_PATH = /^[A-Za-z0-9][A-Za-z0-9-]*\.md$/;
-const MANIFEST_FILE = '.manifest.json';
-const OVERRIDES_DIR = 'overrides';
 /** The project tier's home inside the customer repo (US-019). */
 const PROJECT_RULES_DIR = '.project-management/rules/';
 const VERSIONS_FILE = '.versions.json';
@@ -68,75 +52,29 @@ function flagValue(argv, name) {
   return flag !== -1 && argv[flag + 1] ? path.resolve(argv[flag + 1]) : null;
 }
 
-function cacheDirFrom(argv, env) {
-  const flagged = flagValue(argv, '--cache');
-  if (flagged) return flagged;
-  if (env.CLAUDE_PLUGIN_ROOT) return path.resolve(env.CLAUDE_PLUGIN_ROOT, 'rules-cache');
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'rules-cache');
-}
-
 function projectRootFrom(argv, cwd) {
   return flagValue(argv, '--project-root') ?? path.resolve(cwd);
 }
 
-function readDeltas(stdin) {
+/**
+ * Picks the project tier off stdin. Accepts the whole work_claim result, a
+ * rule_deltas object ({ project }), or the LEGACY pre-US-044 shape (framework
+ * `changed`/`removed` at the top level — ignored, applied as an empty tier).
+ * Anything else is malformed (exit non-zero, nothing written).
+ */
+function readProjectDeltas(stdin) {
   const parsed = JSON.parse(stdin);
   const deltas = parsed?.directive?.rule_deltas ?? parsed?.rule_deltas ?? parsed;
-  if (!Array.isArray(deltas?.changed) || !Array.isArray(deltas?.removed)) {
-    throw new Error('stdin is not a rule_deltas object ({ manifest_sha256, changed, removed })');
+  const project = deltas?.project;
+  if (Array.isArray(project?.changed) && Array.isArray(project?.removed)) return project;
+  // Legacy framework-only shape (pre-US-044 server): nothing to apply.
+  if (Array.isArray(deltas?.changed) && Array.isArray(deltas?.removed)) {
+    return { changed: [], removed: [] };
   }
-  return deltas;
+  throw new Error('stdin is not a rule_deltas object ({ project: { changed, removed } })');
 }
 
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
-
-function readManifest(cacheDir) {
-  const file = path.join(cacheDir, MANIFEST_FILE);
-  if (!existsSync(file)) return { files: {} };
-  const parsed = JSON.parse(readFileSync(file, 'utf8'));
-  return { manifest_sha256: parsed.manifest_sha256, files: { ...(parsed.files ?? {}) } };
-}
-
-function writeManifest(cacheDir, manifest) {
-  const files = Object.fromEntries(
-    Object.entries(manifest.files).sort(([a], [b]) => (a < b ? -1 : 1)),
-  );
-  const out =
-    manifest.manifest_sha256 === undefined
-      ? { files }
-      : { manifest_sha256: manifest.manifest_sha256, files };
-  writeFileSync(path.join(cacheDir, MANIFEST_FILE), `${JSON.stringify(out, null, 2)}\n`, 'utf8');
-}
-
-/** Absolute target for a delta path, or null when it must be refused. */
-function resolveInside(cacheDir, relPath) {
-  if (typeof relPath !== 'string' || !RULE_PATH.test(relPath)) return null;
-  const target = path.resolve(cacheDir, relPath);
-  return target.startsWith(cacheDir + path.sep) && path.dirname(target) === cacheDir
-    ? target
-    : null;
-}
-
-/** A free override name: <name>.local.md, then <name>.local-2.md, -3, ... */
-function overridePath(cacheDir, relPath) {
-  const base = relPath.slice(0, -'.md'.length);
-  const dir = path.join(cacheDir, OVERRIDES_DIR);
-  for (let n = 1; ; n += 1) {
-    const candidate = path.join(dir, n === 1 ? `${base}.local.md` : `${base}.local-${n}.md`);
-    if (!existsSync(candidate)) return candidate;
-  }
-}
-
-/** Moves a locally edited cached file to overrides/. Returns true when promoted. */
-function promoteIfEdited(cacheDir, relPath, target, lastDelivered) {
-  if (!existsSync(target)) return false;
-  if (sha256(readFileSync(target, 'utf8')) === lastDelivered) return false;
-  mkdirSync(path.join(cacheDir, OVERRIDES_DIR), { recursive: true });
-  renameSync(target, overridePath(cacheDir, relPath));
-  return true;
-}
-
-// --- project tier (US-019) ---------------------------------------------------
 
 function readVersions(rulesDir) {
   const file = path.join(rulesDir, VERSIONS_FILE);
@@ -209,70 +147,23 @@ export function applyProjectDeltas(project, projectRoot) {
   return summary;
 }
 
-function hasProjectTier(deltas) {
-  return Array.isArray(deltas.project?.changed) && Array.isArray(deltas.project?.removed);
-}
-
-// --- framework tier (US-018) -------------------------------------------------
-
-export function applyRuleDeltas(deltas, cacheDir, projectRoot = process.cwd()) {
-  mkdirSync(cacheDir, { recursive: true });
-  const manifest = readManifest(cacheDir);
-  const summary = { written: 0, removed: 0, promoted: 0, refused: 0 };
-  let mutated = false;
-
-  for (const entry of deltas.changed) {
-    const target = resolveInside(cacheDir, entry?.path);
-    if (target === null || typeof entry.body !== 'string') {
-      summary.refused += 1;
-      continue;
-    }
-    if (promoteIfEdited(cacheDir, entry.path, target, manifest.files[entry.path]))
-      summary.promoted += 1;
-    writeFileSync(target, entry.body, 'utf8');
-    manifest.files[entry.path] = sha256(entry.body);
-    summary.written += 1;
-    mutated = true;
-  }
-
-  for (const relPath of deltas.removed) {
-    const target = resolveInside(cacheDir, relPath);
-    if (target === null) {
-      summary.refused += 1;
-      continue;
-    }
-    if (promoteIfEdited(cacheDir, relPath, target, manifest.files[relPath])) summary.promoted += 1;
-    if (existsSync(target)) unlinkSync(target);
-    if (relPath in manifest.files) delete manifest.files[relPath];
-    summary.removed += 1;
-    mutated = true;
-  }
-
-  if (
-    typeof deltas.manifest_sha256 === 'string' &&
-    deltas.manifest_sha256 !== manifest.manifest_sha256
-  ) {
-    manifest.manifest_sha256 = deltas.manifest_sha256;
-    mutated = true;
-  }
-  if (mutated || !existsSync(path.join(cacheDir, MANIFEST_FILE))) writeManifest(cacheDir, manifest);
-  if (hasProjectTier(deltas)) summary.project = applyProjectDeltas(deltas.project, projectRoot);
-  return summary;
+/** The one-line JSON summary main() prints: the project tier only (US-044). */
+export function applyRuleDeltas(project, projectRoot = process.cwd()) {
+  return { project: applyProjectDeltas(project, projectRoot) };
 }
 
 /** Exit 1 when anything was refused or a project file was skipped as an unsynced edit. */
 function exitCodeFor(summary) {
-  const project = summary.project ?? { refused: 0, conflicts: [] };
-  return summary.refused > 0 || project.refused > 0 || project.conflicts.length > 0 ? 1 : 0;
+  return summary.project.refused > 0 || summary.project.conflicts.length > 0 ? 1 : 0;
 }
 
 /**
  * Reads ALL of stdin synchronously — robust on a non-blocking PIPE.
  *
  * `readFileSync(0)` throws `EAGAIN` once the piped payload exceeds the OS pipe
- * buffer (~64 KB): the first `/hub:claim` streams the whole framework tier (~430 KB)
- * in on stdin, so it reliably crashed. This drains fd 0 in a `readSync` loop instead,
- * retrying on EAGAIN (data not yet available) and stopping at EOF (0 bytes read).
+ * buffer (~64 KB): a work_claim result carrying several project rules can clear
+ * that, so this drains fd 0 in a `readSync` loop instead, retrying on EAGAIN
+ * (data not yet available) and stopping at EOF (0 bytes read).
  * Zero-dependency, synchronous — keeps `main()` unchanged in shape.
  */
 function readStdinSync() {
@@ -298,8 +189,7 @@ function readStdinSync() {
 function main() {
   const argv = process.argv.slice(2);
   const summary = applyRuleDeltas(
-    readDeltas(readStdinSync()),
-    cacheDirFrom(argv, process.env),
+    readProjectDeltas(readStdinSync()),
     projectRootFrom(argv, process.cwd()),
   );
   process.stdout.write(`${JSON.stringify(summary)}\n`);

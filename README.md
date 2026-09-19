@@ -2,7 +2,7 @@
 
 Install the Holycode Hub client into Claude Code with two commands. **No repo clone. No
 `claude mcp add`. No access to the method.** The plugin is a thin set of `/hub:*` command
-stubs plus a rule/command sync — the licensed OAuth credential is the value.
+stubs plus a command-card sync — the licensed OAuth credential is the value.
 
 ## Prerequisites
 
@@ -24,8 +24,9 @@ serves discovery, PKCE and dynamic registration); sign in there.
 ## First run
 
 1. `/hub:init <project-id>` — join the project your owner shares with you.
-2. `/hub:claim <story-id>` — claim a story; the first claim syncs the framework rules and
-   command cards into the plugin.
+2. `/hub:claim <story-id>` — claim a story; the first claim syncs the framework command
+   cards into the plugin. Everything a step needs — story text, acceptance criteria, gate
+   criteria — arrives in the claim response itself.
 3. **Restart Claude Code** after the first claim. Claude Code registers commands at session
    start, so the synced framework commands (`/generate-docs`, `/run-tests`, …) appear in
    the **next** session, not mid-session.
@@ -35,13 +36,16 @@ serves discovery, PKCE and dynamic registration); sign in there.
 - The `/hub:*` coordination commands: `init`, `plan`, `estimate`, `export`, `status`,
   `claim`, `sync`, `verify`, `complete`, `release`.
 - The framework command cards, synced on the first `/hub:claim` (thin command surface that
-  points at the synced framework rules — no orchestration steps).
+  points at the directive each claim returns — no orchestration steps).
 
 ## What you never get
 
 - **No method.** The plugin ships zero orchestration — no `commands/modules/`, no method
   steps, no calibration constants. Nothing from the private method repository.
-- The empty rule/command caches ship empty and are filled only at runtime, on your machine,
+- **No framework rules.** The framework rule tier never leaves the Hub — the knowledge a
+  step needs arrives in the claim directive (story text, acceptance criteria, gate
+  criteria). Your project's OWN rule files still sync into your repository.
+- The empty command cache ships empty and is filled only at runtime, on your machine,
   from the Hub over your licensed credential.
 
 The plugin is a bearer-of-nothing: a set of stubs, hooks, apply scripts and a URL. The value

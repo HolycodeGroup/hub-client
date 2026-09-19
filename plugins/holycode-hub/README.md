@@ -1,10 +1,12 @@
 # Holycode Hub — Claude Code client (`holycode-hub` plugin)
 
-The lean client layer of the Holycode Hub for Claude Code: seven command stubs, one pointer
-file, one session-start convenience check, a rule cache filled by the one-way rule sync, a
-version ledger for the project's own rules and the zero-dependency script that applies both. Nothing in this package describes method — every
-planning, estimation and gate decision happens on the Hub. The client only knows *which* tool to
-call, never *how* the Hub answers.
+The lean client layer of the Holycode Hub for Claude Code: the command stubs, one pointer
+file, one session-start convenience check, a command-card cache filled by the one-way command
+sync, a version ledger for the project's own rules and the zero-dependency scripts that apply
+both. Nothing in this package describes method, and **no framework rule file ever lands on
+this machine** (US-044) — every planning, estimation and gate decision happens on the Hub,
+and the knowledge a step needs arrives in the claim directive. The client only knows *which*
+tool to call, never *how* the Hub answers.
 
 This is the first adapter of the F-001 family; later adapters (other agents) differ only in
 file format.
@@ -56,26 +58,16 @@ so CI's pre-test build can never mask a stale committed copy. See
 Commands are namespaced by the plugin name in Claude Code (`/holycode-hub:init`); the stubs and
 messages write the short form `/hub:init`.
 
-## Claiming a story (the rule sync rides every claim)
+## Claiming a story (the directive is the knowledge)
 
 `/hub:claim <story-id>` calls `work_claim` once and receives the story text, acceptance
-criteria, phase context, the project's gate criteria and an 8-hour lease in one response —
-plus `directive.rule_deltas`, the one-way framework rule sync (US-018):
-
-1. The stub reads `rules-cache/.manifest.json` (if present) and passes it **verbatim** as
-   `rule_cache` — a manifest hash plus `file → sha256` entries, hashes only. The Hub compares
-   and returns only what differs: the whole rule tier on the first claim (~430 KB, once per
-   machine), nothing when the cache matches, exactly the changed files otherwise.
-2. The stub pipes `rule_deltas` into `scripts/apply-rule-deltas.mjs` (Node ≥ 20, no
-   dependencies), which writes the files under `rules-cache/` and rewrites `.manifest.json` in
-   the request shape for the next claim.
-3. A rule you edited locally is **promoted** to `rules-cache/overrides/<name>.local.md` before
-   the canon version is written — never overwritten, never sent to the Hub. The Hub accepts no
-   rule content in a request (a `body` in `rule_cache` is a 400): the sync is one-way by
-   construction.
-
-The cache lives in the plugin directory, never in your repository; a delta whose path would
-land outside `rules-cache/` is refused.
+criteria, phase context, the project's gate criteria and an 8-hour lease in one response.
+**The framework rule sync (US-018) is withdrawn (US-044):** no framework rule file is ever
+written to this machine — `directive.rule_deltas` carries only the `project` tier (your own
+project's rule files), and the Hub's rule canon is egress-guarded server-side. What a step
+needs to know arrives in the directive itself. The Hub still accepts no rule content in a
+request (a `body` in `rule_cache` is a 400), and a legacy 0.2.x client that still sends its
+old framework hashes is accepted-and-ignored rather than broken.
 
 ## Framework commands (the command tier rides every claim)
 
@@ -83,9 +75,9 @@ Every `/hub:claim` also carries `directive.command_deltas` — the framework com
 (`generate-docs`, `add-scope`, `add-bug`, `run-tests`, `security-scan`, `audit-pm`,
 `process-client-docs`, `resolve-questions`, `screen-map`, `estimate-ai-hours`, `execute-work`).
 The claim stub pipes them into `scripts/apply-command-deltas.mjs`, which writes them under the
-plugin's `commands-cache/` (same one-way delta mechanism as rules; hashes-only `command_cache`).
-Cards are the thin command **surface** — they point the agent at the synced framework rules; the
-orchestration method never leaves the Hub.
+plugin's `commands-cache/` (a one-way hash-delta mechanism; hashes-only `command_cache`).
+Cards are the thin command **surface** — they point the agent at the directive each claim
+returns; the orchestration method (and the framework rule canon) never leaves the Hub.
 
 The plugin manifest lists **both** command directories — `"commands": ["./commands/",
 "./commands-cache/"]` — so the synced cards register as slash commands alongside the shipped
@@ -120,11 +112,10 @@ both ways, tracked by `.project-management/rules/.versions.json`
 |------|---------|
 | `.claude-plugin/plugin.json` | Plugin manifest (`holycode-hub`) |
 | `.mcp.json` | The Hub MCP server entry (install step 1) |
-| `commands/{init,plan,estimate,export,status,claim,sync,verify,complete,release}.md` | One stub per Hub tool with a real handler — each names exactly one tool and ends with the backstop "Make no further Hub calls for this step." The work loop is `/hub:claim` → (implement locally) → `/hub:verify` → `/hub:complete`, or `/hub:release` to return a story to the pool. |
+| `commands/{init,plan,estimate,export,status,claim,sync,sync-commands,guidance,verify,complete,release}.md` | One stub per Hub tool with a real handler — 12 commands, each names exactly one tool and ends with the backstop "Make no further Hub calls for this step." The work loop is `/hub:claim` → (implement locally) → `/hub:verify` → `/hub:complete`, or `/hub:release` to return a story to the pool. `/hub:sync-commands` downloads the framework command cards without claiming a story; `/hub:guidance <question>` asks the Hub a how-to question and receives a scoped, licence-gated answer (never a rule file). |
 | `hooks/hooks.json` + `hooks/session-start.sh` | Session-start check: prints the linked project (or how to link one). Reads one local file, never the network, always exits 0 — convenience only; enforcement is the work order minted by the Hub on every call |
 | `agents/hub-workflow-section.md` | The marker-bounded `AGENTS.md` workflow block `/hub:init` seeds into the customer repo (F-008) — cross-tool onboarding so MCP-only agents learn the work loop; committed copy of the `hub-client-core` source |
-| `scripts/apply-rule-deltas.mjs` | Applies `work_claim`'s `rule_deltas`: the framework tier to `rules-cache/` (US-018 — writes changed files, deletes removed ones, promotes local edits to `overrides/`, maintains `.manifest.json`) and the project tier to the repo's `.project-management/rules/` (US-019 — never over an unsynced local edit, maintains `.versions.json`, never deletes); refuses any path outside its directory; never a network call |
-| `rules-cache/` | Ships empty (README + `.gitignore`); the one-way rule sync fills it at runtime on the licensee machine — never committed |
+| `scripts/apply-rule-deltas.mjs` | Applies `work_claim`'s `rule_deltas` — the PROJECT tier only (US-019; the framework tier is withdrawn, US-044) — to the repo's `.project-management/rules/` (never over an unsynced local edit, maintains `.versions.json`, never deletes); refuses any path outside that directory; never a network call |
 
 Only `work_progress` (the optional heartbeat) has no stub yet — it is a nice-to-have, not
 part of the claim → verify → complete loop.
@@ -132,7 +123,8 @@ part of the claim → verify → complete loop.
 ## Never installed
 
 - Method: planning prompts, verification modules, templates, calibration constants
-- The Hub's rule-tier sources — only the synced cache under `rules-cache/`, populated at runtime
+- **Any framework rule file** — the rule tier stays on the Hub (US-044); the knowledge a step
+  needs arrives in the claim directive, and the project's own rules live in your repository
 - Any credential — sign-in lives in Claude Code's credential store
 
 The whole package is scanned in the backend test suite against the egress guard's own
@@ -149,9 +141,9 @@ informational — the connected server decides where calls go.
 ## Tests
 
 `pnpm --filter client-claude-code test` — stub budget and backstop, one-tool-per-stub, manifest
-and hook wiring, the session-start script in all three pointer states, and the rule-delta
-script against real temp caches and temp project roots (fresh cache, unchanged, local-edit
-promotion, removals, traversal refusal, manifest shape, no-network; project tier: ledger shape,
-conflict skip, record drop without delete, traversal refusal). The install round trip, the forged-pointer
-abuse case and the rule sync over the wire run black-box in `apps/backend/e2e`; the no-method
-leak scan runs in `apps/backend/__tests__/integration`.
+and hook wiring, the session-start script in all three pointer states, and (in
+`hub-client-core`) the rule-delta script against real temp project roots (project tier only:
+ledger shape, conflict skip, record drop without delete, traversal refusal, legacy
+framework-payload no-op, no-network). The install round trip, the forged-pointer abuse case
+and the rule-sync withdrawal over the wire run black-box in `apps/backend/e2e`; the no-method
++ no-canon leak scans run in `apps/backend/__tests__/integration`.

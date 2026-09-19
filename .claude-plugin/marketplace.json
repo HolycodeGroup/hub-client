@@ -9,7 +9,7 @@
     {
       "name": "holycode-hub",
       "source": "./plugins/holycode-hub",
-      "description": "Thin command stubs + rule/command sync over the Hub MCP server. No method is installed — the licensed OAuth credential is the value."
+      "description": "Thin command stubs + command-card sync over the Hub MCP server. No method and no framework rules are installed — the licensed OAuth credential is the value."
     }
   ]
 }
