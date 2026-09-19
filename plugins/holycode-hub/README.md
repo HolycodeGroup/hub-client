@@ -9,6 +9,29 @@ call, never *how* the Hub answers.
 This is the first adapter of the F-001 family; later adapters (other agents) differ only in
 file format.
 
+## Architecture — source of truth is `hub-client-core` (F-001)
+
+This package does not author the sync engine or the command surface — it **commits copies** of
+them from [`packages/hub-client-core`](../hub-client-core/README.md), the tool-neutral source of
+truth:
+
+- `scripts/apply-rule-deltas.mjs` + `scripts/apply-command-deltas.mjs` are **byte-identical copies**
+  of the core scripts (so the shipped plugin stays self-contained and `claude --plugin-dir` works).
+- `commands/*.md` are **generated** from the core command spec (`hub-client-core/src/command-spec.mjs`)
+  by its Claude renderer — the frontmatter carries no `name:`, so each registers as
+  `/holycode-hub:<name>` (never a bare `/name`).
+
+After editing a core apply script or the command spec, regenerate the committed copies:
+
+```bash
+node scripts/sync-client-from-core.mjs   # from the repo root
+```
+
+Two drift tests fail until you regenerate and commit: `core-copy-sync.test.ts` (scripts) and
+`stub-generation.test.ts` (stubs). The regeneration is **manual by design** — never a build step —
+so CI's pre-test build can never mask a stale committed copy. See
+[`hub-client-core/README.md`](../hub-client-core/README.md) → "How to add a new tool adapter".
+
 ## Install (three steps, no repository clone)
 
 1. **Install the plugin.** The package directory is a complete Claude Code plugin
@@ -24,7 +47,11 @@ file format.
      (zero Hub calls).
 
    Both write `.project-management/hub-pointer.md` — the project id plus the Hub URL. Commit
-   it; every other stub resolves the project from that file.
+   it; every other stub resolves the project from that file. The same step also seeds the
+   repository's `AGENTS.md` with the Hub workflow section (F-008) — a marker-bounded block
+   copied from the shipped `agents/hub-workflow-section.md`, so ANY agent reading `AGENTS.md`
+   (Codex, Cursor, Gemini — no plugin needed) learns the claim → verify → complete loop. Re-runs
+   replace only the block between the markers; your own `AGENTS.md` content is never touched.
 
 Commands are namespaced by the plugin name in Claude Code (`/holycode-hub:init`); the stubs and
 messages write the short form `/hub:init`.
@@ -95,6 +122,7 @@ both ways, tracked by `.project-management/rules/.versions.json`
 | `.mcp.json` | The Hub MCP server entry (install step 1) |
 | `commands/{init,plan,estimate,export,status,claim,sync,verify,complete,release}.md` | One stub per Hub tool with a real handler — each names exactly one tool and ends with the backstop "Make no further Hub calls for this step." The work loop is `/hub:claim` → (implement locally) → `/hub:verify` → `/hub:complete`, or `/hub:release` to return a story to the pool. |
 | `hooks/hooks.json` + `hooks/session-start.sh` | Session-start check: prints the linked project (or how to link one). Reads one local file, never the network, always exits 0 — convenience only; enforcement is the work order minted by the Hub on every call |
+| `agents/hub-workflow-section.md` | The marker-bounded `AGENTS.md` workflow block `/hub:init` seeds into the customer repo (F-008) — cross-tool onboarding so MCP-only agents learn the work loop; committed copy of the `hub-client-core` source |
 | `scripts/apply-rule-deltas.mjs` | Applies `work_claim`'s `rule_deltas`: the framework tier to `rules-cache/` (US-018 — writes changed files, deletes removed ones, promotes local edits to `overrides/`, maintains `.manifest.json`) and the project tier to the repo's `.project-management/rules/` (US-019 — never over an unsynced local edit, maintains `.versions.json`, never deletes); refuses any path outside its directory; never a network call |
 | `rules-cache/` | Ships empty (README + `.gitignore`); the one-way rule sync fills it at runtime on the licensee machine — never committed |
 
