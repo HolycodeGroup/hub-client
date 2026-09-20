@@ -55,6 +55,10 @@ so CI's pre-test build can never mask a stale committed copy. See
    (Codex, Cursor, Gemini — no plugin needed) learns the claim → verify → complete loop. Re-runs
    replace only the block between the markers; your own `AGENTS.md` content is never touched.
 
+   `/hub:init` then also points you at `/hub:sync-commands` (+ a Claude Code restart) so the same
+   onboarding step pulls the framework commands (`/holycode-hub:execute-work`, `/holycode-hub:add-bug`, …)
+   — one command step to become productive, not two.
+
 Commands are namespaced by the plugin name in Claude Code (`/holycode-hub:init`); the stubs and
 messages write the short form `/hub:init`.
 
