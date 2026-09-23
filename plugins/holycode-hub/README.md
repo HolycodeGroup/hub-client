@@ -40,9 +40,11 @@ so CI's pre-test build can never mask a stale committed copy. See
    (`.claude-plugin/plugin.json`). Installing it also registers the Hub MCP server — the
    bundled `.mcp.json` declares `holycode-hub` at `https://hub.holycode.com/mcp`, so there is
    no server URL to type. For local development: `claude --plugin-dir ./packages/client-claude-code`.
-2. **Sign in once.** On the first Hub call Claude Code runs its native OAuth flow for HTTP MCP
-   servers (the Hub serves discovery, dynamic client registration and PKCE). The credential
-   lands in Claude Code's own store — never in this repository.
+2. **Sign in once (email + password from your admin's invite).** On the first Hub call Claude
+   Code runs its native OAuth flow for HTTP MCP servers (the Hub serves discovery, dynamic client
+   registration and PKCE); on the consent page you sign in with the email + password you set from
+   your admin's invite email. The credential lands in Claude Code's own store — never in this
+   repository.
 3. **Link the directory:** run `/hub:init` in the project you want to connect.
    - An **OWNER** creates a new Hub project (one `project_create` call).
    - A **DEVELOPER** joins an existing one with the id the owner shares: `/hub:init <project-id>`
