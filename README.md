@@ -53,7 +53,7 @@ is the credential the Hub honours, not any content on disk.
 
 ## Hub URL
 
-This client currently talks to the Hub at `https://rd-hub-staging.up.railway.app/mcp`
+This client currently talks to the Hub at `https://rd-hub-app-production.up.railway.app/mcp`
 (Railway staging — where the full tool surface, including claim-free command delivery, is
-deployed and the database is seeded for testing). It moves to `https://hub.holycode.com/mcp`
+deployed and the database is seeded for testing). It moves to `https://rdhub.holycode.ai/mcp`
 later; when it does, a new marketplace release ships the updated URL — reinstall to pick it up.

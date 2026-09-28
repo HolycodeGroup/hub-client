@@ -1,11 +1,11 @@
 {
   "name": "holycode-hub",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "description": "Holycode Hub client: thin command stubs over the Hub MCP server and a pointer file. No method and no framework rules are installed.",
   "author": {
     "name": "Holycode"
   },
-  "homepage": "https://hub.holycode.com",
+  "homepage": "https://rdhub.holycode.ai",
   "keywords": ["holycode", "hub", "mcp", "rapid-delivery"],
   "commands": ["./commands/", "./commands-cache/"]
 }
