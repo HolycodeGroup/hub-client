@@ -1,7 +1,7 @@
 # Holycode Hub — Claude Code client
 
 Install the Holycode Hub client into Claude Code with two commands. **No repo clone. No
-`claude mcp add`. No access to the method.** The plugin is a thin set of `/hub:*` command
+`claude mcp add`. No access to the method.** The plugin is a thin set of `/holycode-hub:*` command
 stubs plus a command-card sync — the licensed OAuth credential is the value.
 
 ## Prerequisites
@@ -23,8 +23,8 @@ serves discovery, PKCE and dynamic registration); sign in there.
 
 ## First run
 
-1. `/hub:init <project-id>` — join the project your owner shares with you.
-2. `/hub:claim <story-id>` — claim a story; the first claim syncs the framework command
+1. `/holycode-hub:init <project-id>` — join the project your owner shares with you.
+2. `/holycode-hub:claim <story-id>` — claim a story; the first claim syncs the framework command
    cards into the plugin. Everything a step needs — story text, acceptance criteria, gate
    criteria — arrives in the claim response itself.
 3. **Restart Claude Code** after the first claim. Claude Code registers commands at session
@@ -33,9 +33,9 @@ serves discovery, PKCE and dynamic registration); sign in there.
 
 ## What you get
 
-- The `/hub:*` coordination commands: `init`, `plan`, `estimate`, `export`, `status`,
+- The `/holycode-hub:*` coordination commands: `init`, `plan`, `estimate`, `export`, `status`,
   `claim`, `sync`, `verify`, `complete`, `release`.
-- The framework command cards, synced on the first `/hub:claim` (thin command surface that
+- The framework command cards, synced on the first `/holycode-hub:claim` (thin command surface that
   points at the directive each claim returns — no orchestration steps).
 
 ## What you never get

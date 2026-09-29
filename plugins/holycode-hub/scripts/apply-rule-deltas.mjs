@@ -20,7 +20,7 @@
 //   { "<path>": { "version": n, "sha256": "<sha256 of the body as written>" } }
 // The work_claim `rule_cache` request is that file mapped to
 // `{ "project": { "<path>": <version> } }` — versions only, never text or
-// hashes (the /hub:claim stub does exactly that; /hub:sync sends `version`
+// hashes (the /holycode-hub:claim stub does exactly that; /holycode-hub:sync sends `version`
 // back as `base_version` and records the { version, sha256 } project_sync
 // returns).
 //
@@ -30,7 +30,7 @@
 //     must be the sha256 of its body — else REFUSED (nothing written);
 //   - a project file whose CURRENT sha256 is neither the recorded one nor the
 //     incoming one is an UNSYNCED LOCAL EDIT: it is NEVER overwritten — skipped,
-//     listed under `project.conflicts`, exit 1 — the user runs /hub:sync first;
+//     listed under `project.conflicts`, exit 1 — the user runs /holycode-hub:sync first;
 //   - a `project.removed` path only DROPS the `.versions.json` record — a
 //     customer file is never deleted by this script (v1 has no delete);
 //   - NEVER a network call; prints one JSON line

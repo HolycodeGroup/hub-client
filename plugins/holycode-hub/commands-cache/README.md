@@ -1,15 +1,15 @@
 # Command-Card Cache
 
-Populated at runtime, never committed. `/hub:claim` calls `work_claim` with the hashes in
+Populated at runtime, never committed. `/holycode-hub:claim` calls `work_claim` with the hashes in
 `.manifest.json` and pipes the returned `command_deltas` into `scripts/apply-command-deltas.mjs`,
-which writes the framework command **cards** here — thin `/hub:*` command surface only, never the
+which writes the framework command **cards** here — thin `/holycode-hub:*` command surface only, never the
 orchestration method (hard rule: nothing that describes method ships in the client layer). The
 sync is one-way (Hub → here) and rides every claim, not session start.
 
 What lands here:
 
 - `<name>.md` — the framework command cards as the Hub publishes them (the licensed command tier).
-  Each card is a thin command that points the agent at the directive returned by `/hub:claim`
+  Each card is a thin command that points the agent at the directive returned by `/holycode-hub:claim`
   (story text, acceptance criteria, gate criteria); it carries no orchestration steps and no
   framework rule content (US-044: the rule tier never leaves the Hub).
 - `.manifest.json` — `{ "manifest_sha256", "files": { "<name>.md": "<sha256>" } }`, exactly the

@@ -13,9 +13,9 @@
 // with NO project tier (cards are never a two-way customer artifact). It owns
 // `commands-cache/.manifest.json`, written in EXACTLY the work_claim
 // `command_cache` request shape — { manifest_sha256, files: { path: sha256 } },
-// hashes only — so the /hub:claim stub passes it through verbatim next time.
+// hashes only — so the /holycode-hub:claim stub passes it through verbatim next time.
 //
-// The cards themselves are the thin /hub:* command surface (a /generate-docs,
+// The cards themselves are the thin /holycode-hub:* command surface (a /generate-docs,
 // /run-tests, … that points the agent at the synced framework rules); the
 // orchestration METHOD is never delivered (it stays server-side, fingerprinted
 // by the Hub's egress guard). This script only materializes surface.
@@ -168,7 +168,7 @@ function exitCodeFor(summary) {
  * Reads ALL of stdin synchronously — robust on a non-blocking PIPE.
  *
  * `readFileSync(0)` throws `EAGAIN` once the piped payload exceeds the OS pipe
- * buffer (~64 KB): the first `/hub:claim` streams the whole command tier in on
+ * buffer (~64 KB): the first `/holycode-hub:claim` streams the whole command tier in on
  * stdin, so it can exceed that. This drains fd 0 in a `readSync` loop instead,
  * retrying on EAGAIN (data not yet available) and stopping at EOF (0 bytes read).
  */

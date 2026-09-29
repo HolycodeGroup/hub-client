@@ -3,7 +3,7 @@ description: Release a claimed Hub story's lease without completing it — retur
 argument-hint: <story-id>
 ---
 1. Read `.project-management/hub-pointer.md` and take the value of its `**Project ID:**` line.
-2. If the file is missing or has no project id, tell the user "No Hub project in this directory — run /hub:init" and stop.
+2. If the file is missing or has no project id, tell the user "No Hub project in this directory — run /holycode-hub:init" and stop.
 3. Call the `work_release` tool on the `holycode-hub` MCP server exactly once with `{ "project_id": "<that id>", "story_id": "$ARGUMENTS" }`.
 4. Handle the answer:
    - success → tell the user the lease is released and the story is claimable again by any developer.
