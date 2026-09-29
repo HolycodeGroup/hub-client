@@ -18,4 +18,15 @@ Project status: `project_status { project_id }`.
 
 Agents with the Holycode Hub plugin (Claude Code) use the slash commands instead:
 `/holycode-hub:claim`, `/holycode-hub:verify`, `/holycode-hub:complete`, `/holycode-hub:status`.
+
+### Git conventions (apply from the very first commit)
+
+The Hub delivers full rules per claim, but the pointer + `AGENTS.md` commit happens before
+any claim — so these always-on conventions apply immediately:
+
+- **Conventional commit** subjects (`feat:`, `fix:`, `docs:`, `chore:` …), imperative, ≤ 72 chars.
+- **NO AI credits** — never add `Co-Authored-By: <AI>` or "Generated with …" trailers.
+- **Branch + pull request** — create a `<type>/<descriptor>` branch and open a PR.
+  **Never commit directly to `main`** (it is protected). The link commit (pointer + `AGENTS.md`)
+  follows this too.
 <!-- holycode-hub:end -->
