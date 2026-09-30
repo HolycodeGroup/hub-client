@@ -23,15 +23,21 @@
 // Invariants (tested in __tests__/apply-command-deltas.test.ts):
 //   - a delta path must match the flat card shape AND resolve inside the cache
 //     root, else it is REFUSED (counted, exit 1, nothing written);
+//   - a card whose name collides with a bundled stub (sibling ./commands/) is
+//     SKIPPED, never written — the plugin registers both ./commands/ and this
+//     ./commands-cache/, so materializing the card would double the command in
+//     the slash menu (BUG-037); the bundled stub is the authoritative copy;
 //   - a cached card whose CURRENT sha256 differs from the last delivered one is
 //     a LOCAL EDIT: moved to overrides/<name>.local.md (-2, -3, ... never
 //     overwriting) BEFORE the canon body lands or the file is removed;
-//   - NEVER a network call; prints one JSON line { written, removed, promoted, refused }.
+//   - NEVER a network call; prints one JSON line
+//     { written, removed, promoted, refused, skipped }.
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readSync,
   renameSync,
@@ -45,6 +51,21 @@ import { fileURLToPath } from 'node:url';
 const CARD_PATH = /^[A-Za-z0-9][A-Za-z0-9-]*\.md$/;
 const MANIFEST_FILE = '.manifest.json';
 const OVERRIDES_DIR = 'overrides';
+
+/**
+ * The bundled-stub names (BUG-037). The plugin registers BOTH `./commands/` (bundled stubs, always
+ * present, generated from the command spec) AND `./commands-cache/` (these synced cards). A card
+ * whose name collides with a bundled stub would be registered from two directories at once, so the
+ * same `/holycode-hub:*` command shows up TWICE in the slash menu. The bundled stub is the
+ * authoritative, always-present copy, so a delivered card with the same name is dropped here rather
+ * than materialized. `commands/` is a sibling of the cache dir in the installed plugin; when it is
+ * absent (e.g. an isolated cache dir) the exclusion set is empty — every card writes as before.
+ */
+function bundledStubNames(cacheDir) {
+  const bundledDir = path.join(path.dirname(cacheDir), 'commands');
+  if (!existsSync(bundledDir)) return new Set();
+  return new Set(readdirSync(bundledDir).filter((name) => name.endsWith('.md')));
+}
 
 function flagValue(argv, name) {
   const flag = argv.indexOf(name);
@@ -118,13 +139,19 @@ function promoteIfEdited(cacheDir, relPath, target, lastDelivered) {
 export function applyCommandDeltas(deltas, cacheDir) {
   mkdirSync(cacheDir, { recursive: true });
   const manifest = readManifest(cacheDir);
-  const summary = { written: 0, removed: 0, promoted: 0, refused: 0 };
+  const bundled = bundledStubNames(cacheDir);
+  const summary = { written: 0, removed: 0, promoted: 0, refused: 0, skipped: 0 };
   let mutated = false;
 
   for (const entry of deltas.changed) {
     const target = resolveInside(cacheDir, entry?.path);
     if (target === null || typeof entry.body !== 'string') {
       summary.refused += 1;
+      continue;
+    }
+    // A bundled stub already owns this name — writing the card would double it in the menu (BUG-037).
+    if (bundled.has(entry.path)) {
+      summary.skipped += 1;
       continue;
     }
     if (promoteIfEdited(cacheDir, entry.path, target, manifest.files[entry.path]))
@@ -139,6 +166,11 @@ export function applyCommandDeltas(deltas, cacheDir) {
     const target = resolveInside(cacheDir, relPath);
     if (target === null) {
       summary.refused += 1;
+      continue;
+    }
+    // The cache never materialized a bundled-stub name, so there is nothing to remove (BUG-037).
+    if (bundled.has(relPath)) {
+      summary.skipped += 1;
       continue;
     }
     if (promoteIfEdited(cacheDir, relPath, target, manifest.files[relPath])) summary.promoted += 1;
