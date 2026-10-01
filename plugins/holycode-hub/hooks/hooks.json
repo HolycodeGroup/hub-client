@@ -1,5 +1,5 @@
 {
-  "description": "Session-start convenience check: reports whether the working directory is linked to a Hub project. Never a network call, never blocks the session — enforcement is the work order, not this hook.",
+  "description": "Session-start convenience check: prints the always-on git conventions, reports whether the working directory is linked to a Hub project, and warns when the AGENTS.md Hub block is stale. Never a network call, never blocks the session — enforcement is the work order, not this hook.",
   "hooks": {
     "SessionStart": [
       {

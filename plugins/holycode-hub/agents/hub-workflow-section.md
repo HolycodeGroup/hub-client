@@ -1,4 +1,5 @@
 <!-- holycode-hub:start -->
+<!-- holycode-hub:block-version: 2 -->
 ## Holycode Hub workflow
 
 This repository is linked to a Holycode Hub project — the Hub holds the backlog, estimates and

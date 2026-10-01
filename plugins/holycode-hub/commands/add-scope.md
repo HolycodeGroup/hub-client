@@ -1,9 +1,11 @@
 ---
-description: Add a story to the linked Hub project's backlog — authored on the Hub, not a local file
-argument-hint: <story description>
+description: Add a story to the linked Hub project's backlog, or edit an existing one — authored on the Hub, not a local file
+argument-hint: <story description> | edit <story-id> <what changes>
 ---
 1. Read `.project-management/hub-pointer.md` and take the value of its `**Project ID:**` line.
 2. If the file is missing or has no project id, tell the user "No Hub project in this directory — run /holycode-hub:init" and stop.
-3. Run `/holycode-hub:guidance story template` to get the story shape (persona-form story, testable acceptance criteria, Fibonacci estimate), then build from `$ARGUMENTS` the input `{ "phase": { "name", "priority" }, "epic": { "name", "priority" }, "story": { "title", "description", "acceptance_criteria", "priority", "points" } }`; show it to the user for confirmation before writing.
-4. Call the `project_story_add` tool on the `holycode-hub` MCP server exactly once with `{ "project_id": "<that id>", ...the built phase/epic/story }`.
-5. Report the returned story_id / epic_id / phase_id. Make no further Hub calls for this step.
+3. **Edit mode** — when `$ARGUMENTS` starts with `edit <story-id>`: call the `project_status` tool on the `holycode-hub` MCP server once with `{ "project_id": "<that id>" }` and take that story's row (title, points, priority, deps, screen, its epic id and its `version`); build ONLY the changed fields (`title`, `description`, `acceptance_criteria`, `points`, `priority`, `deps`, `screen`, or `epic_id` of the same project) — a text or list field replaces the stored one wholesale, so write it in full (the board does not return description / acceptance criteria: take the current text from the user or the authoring source); show a before/after diff and ask ONE confirmation.
+4. On yes, call the `project_story_update` tool once with `{ "project_id": "<that id>", "story_id": "<story-id>", "version": <the fetched version>, ...the changed fields }`; a `409` means the story changed since you read it — re-fetch `project_status` and re-show the diff, never blind-retry; a `422` (`BUSINESS_STORY_CLAIMED` / `BUSINESS_STORY_COMPLETED` / `BUSINESS_PROJECT_ARCHIVED`) means report it and stop — a completed story's new scope is a new story. Report the story_id and new version, then stop.
+5. **Add mode** (anything else): run `/holycode-hub:guidance story template` to get the story shape (persona-form story, testable acceptance criteria, Fibonacci estimate), then build from `$ARGUMENTS` the input `{ "phase": { "name", "priority" }, "epic": { "name", "priority" }, "story": { "title", "description", "acceptance_criteria", "priority", "points" } }`; show it to the user for confirmation before writing.
+6. Call the `project_story_add` tool on the `holycode-hub` MCP server exactly once with `{ "project_id": "<that id>", ...the built phase/epic/story }`.
+7. Report the returned story_id / epic_id / phase_id. Make no further Hub calls for this step.
