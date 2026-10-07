@@ -1,0 +1,9 @@
+---
+description: Generate focused BDD test suites from this project's stories (story/epic/phase/jira), with optional Figma design comparison — following the Hub's guidance
+argument-hint: story <id> | epic <id> | phase <n> | jira <KEY...> [--figma <url>]
+---
+1. Read `.project-management/hub-pointer.md` and take the value of its `**Project ID:**` line.
+2. If the file is missing or has no project id, tell the user "No Hub project in this directory — run /holycode-hub:init" and stop.
+3. Call the `work_guidance` tool on the `holycode-hub` MCP server with `{ "project_id": "<that id>", "question": "test-cases" }` to fetch the generation pipeline (the scopes, the acceptance-criteria scope filter, the 5–10 scenario budget, the mandated negative scenarios, and the optional Figma design-comparison stages). For the `jira` scope, also call `work_guidance` with `{ "project_id": "<that id>", "question": "jira-sync" }` — it requires the project's Jira settings enabled and uses your OWN Atlassian MCP session.
+4. Resolve the scope from `$ARGUMENTS` (`story`/`epic`/`phase`/`jira`), read the matching stories (from the Hub board via `/holycode-hub:status`, or from Jira for the `jira` scope), and generate one BDD/Gherkin suite per story under `.project-management/output/test-suites/` applying the scope filter and tracing every scenario to its acceptance criterion. Figma comparison runs only when enabled and a design reference resolves through your own Figma MCP session; every skip is one logged line, never fatal.
+5. Report the suites written and any not-ready stories. The suites are local test files in your repository. Make no further Hub calls for this step.
