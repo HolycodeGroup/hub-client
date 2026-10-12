@@ -1,6 +1,6 @@
 ---
 description: Release a claimed Hub story's lease without completing it — return the story to the pool for another developer
-argument-hint: <story-id>
+argument-hint: <story-key>
 ---
 1. Read `.project-management/hub-pointer.md` and take the value of its `**Project ID:**` line.
 2. If the file is missing or has no project id, tell the user "No Hub project in this directory — run /holycode-hub:init" and stop.

@@ -4,7 +4,7 @@
       "type": "http",
       "url": "https://rd-hub-app-production.up.railway.app/mcp",
       "headers": {
-        "X-Holycode-Client-Version": "0.13.4"
+        "X-Holycode-Client-Version": "0.14.0"
       }
     }
   }
