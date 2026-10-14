@@ -38,7 +38,7 @@ so CI's pre-test build can never mask a stale committed copy. See
 
 1. **Install the plugin.** The package directory is a complete Claude Code plugin
    (`.claude-plugin/plugin.json`). Installing it also registers the Hub MCP server — the
-   bundled `.mcp.json` declares `holycode-hub` at `https://rdhub.holycode.ai/mcp`, so there is
+   bundled `.mcp.json` declares `holycode-hub` at `https://rdhub.holycode.com/mcp`, so there is
    no server URL to type. For local development: `claude --plugin-dir ./packages/client-claude-code`.
 2. **Sign in once (email + password from your admin's invite).** On the first Hub call Claude
    Code runs its native OAuth flow for HTTP MCP servers (the Hub serves discovery, dynamic client

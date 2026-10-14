@@ -2,9 +2,9 @@
   "mcpServers": {
     "holycode-hub": {
       "type": "http",
-      "url": "https://rd-hub-app-production.up.railway.app/mcp",
+      "url": "https://rdhub.holycode.com/mcp",
       "headers": {
-        "X-Holycode-Client-Version": "0.14.0"
+        "X-Holycode-Client-Version": "0.18.0"
       }
     }
   }
