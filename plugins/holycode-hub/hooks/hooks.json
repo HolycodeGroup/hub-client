@@ -1,5 +1,5 @@
 {
-  "description": "Session-start convenience check: prints the always-on git conventions, reports whether the working directory is linked to a Hub project, and warns when the AGENTS.md Hub block is stale. Never a network call, never blocks the session — enforcement is the work order, not this hook.",
+  "description": "Session-start convenience check (git conventions, Hub link state, stale AGENTS.md block) and effort capture (HH-133): timestamps of prompts, stops, tool steps and session end on the claimed story, buffered locally as human/AI segments — timestamps, actor and category only. Never a network call, never blocks the session.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,6 +9,43 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
             "timeout": 5
           }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
         ]
       }
     ]
