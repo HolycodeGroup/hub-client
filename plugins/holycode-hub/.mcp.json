@@ -4,7 +4,7 @@
       "type": "http",
       "url": "https://rdhub.holycode.com/mcp",
       "headers": {
-        "X-Holycode-Client-Version": "0.28.0"
+        "X-Holycode-Client-Version": "0.29.0"
       }
     }
   }
