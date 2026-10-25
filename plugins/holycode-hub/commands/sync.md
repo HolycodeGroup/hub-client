@@ -7,4 +7,4 @@ description: Publish this project's own rule files (.project-management/rules/*.
 4. If nothing changed, tell the user the project rules are in sync and stop; otherwise call the `project_sync` tool on the `holycode-hub` MCP server exactly once with `{ "project_id": "<that id>", "rules": [<those entries>] }`.
 5. On success, set `.versions.json[path] = { "version": version, "sha256": sha256 }` for every returned `{ path, version, sha256 }`, write the file back, and report the new versions.
 6. On a 409 (`CONFLICT_STALE_VERSION`) tell the user which file is stale — the message names it and its current version — and to run `/holycode-hub:claim` first (it delivers the current version into `.project-management/rules/`) before editing again; change nothing locally.
-7. Make no further Hub calls for this step.
+7. **Next step:** end your reply with one line that starts with `Next:` — `Next: carry on with your story — teammates receive the new versions on their next /holycode-hub:claim` (after a 409, the step-6 `/holycode-hub:claim` instead). Make no further Hub calls for this step.
