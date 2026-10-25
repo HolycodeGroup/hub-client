@@ -6,7 +6,8 @@
 //   stdin = the `command_deltas` object from a work_claim result, or the whole
 //   result (`.directive.command_deltas` is picked). Default cache dir:
 //   ${CLAUDE_PLUGIN_ROOT}/commands-cache, else ../commands-cache next to this
-//   script.
+//   script. The SAME script applies the guidance tier (HH-73): stdin =
+//   `directive.guidance_deltas`, `--cache ${CLAUDE_PLUGIN_ROOT}/guidance-cache`.
 //
 // The command tier is framework SURFACE, one-way Hub → client, exactly like the
 // framework rule tier — the mirror of apply-rule-deltas.mjs's FRAMEWORK half,
@@ -62,6 +63,8 @@ const OVERRIDES_DIR = 'overrides';
  * absent (e.g. an isolated cache dir) the exclusion set is empty — every card writes as before.
  */
 function bundledStubNames(cacheDir) {
+  // Only the command-card cache is registered as commands; a guidance cache (HH-73) never collides.
+  if (path.basename(cacheDir) !== 'commands-cache') return new Set();
   const bundledDir = path.join(path.dirname(cacheDir), 'commands');
   if (!existsSync(bundledDir)) return new Set();
   return new Set(readdirSync(bundledDir).filter((name) => name.endsWith('.md')));

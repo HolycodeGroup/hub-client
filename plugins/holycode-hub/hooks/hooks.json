@@ -1,5 +1,5 @@
 {
-  "description": "Session-start convenience check (git conventions, Hub link state, stale AGENTS.md block) and effort capture (HH-133): timestamps of prompts, stops, tool steps and session end on the claimed story, buffered locally as human/AI segments — timestamps, actor and category only. Never a network call, never blocks the session.",
+  "description": "Session-start convenience check (git conventions, Hub link state, stale AGENTS.md block) and effort capture (HH-133): timestamps of prompts, stops, tool steps and session end on the claimed story, buffered locally as human/AI segments — timestamps, actor and category only. Never a network call, never blocks the session. Story worktrees (HH-90): a work_claim / work_progress / work_verify call renews the recorded lease of its story's worktree.",
   "hooks": {
     "SessionStart": [
       {
@@ -46,6 +46,12 @@
         "matcher": ".*",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__work_(claim|progress|verify)",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/story-worktree.mjs\" hook", "timeout": 5 }
         ]
       }
     ]
