@@ -2,22 +2,50 @@
 export type EffortActor = 'HUMAN' | 'AI';
 export type EffortCategory = 'PLANNING' | 'IMPLEMENTATION' | 'REVIEW_GATES' | 'WAITING_ON_ANSWER' | 'OTHER';
 export type EffortSegment = { seq: number; actor: EffortActor; category: EffortCategory; started_at: string; ended_at: string };
+export type UsageCounts = [model: string, input: number, output: number, cacheCreation: number, cacheRead: number];
 export type EffortState = {
-  story: { key: string; leaseExpiresAt: number } | null;
+  story: { key: string; leaseExpiresAt: number; claimedAt?: number } | null;
   step: EffortCategory;
   open: { actor: EffortActor; category: EffortCategory; since: number } | null;
   seq: number;
   pending: EffortSegment[];
+  /** HH-171 — per message id its model and counts; read offsets per transcript; the session transcript. */
+  usage: { messages: Record<string, UsageCounts>; transcripts: Record<string, number>; transcript: string | null };
 };
-export type HookEvent = { hook_event_name: string; cwd?: string; tool_name?: string; tool_input?: unknown; tool_response?: unknown };
+export type HookEvent = {
+  hook_event_name: string;
+  cwd?: string;
+  transcript_path?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+};
+export type ModelUsageSource = 'API_KEY' | 'SUBSCRIPTION';
+export type ModelUsage = {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  requests: number;
+  source: ModelUsageSource;
+};
 
 export const IDLE_CAP_MS: number;
 export const LEASE_TTL_MS: number;
 export const MIN_SEGMENT_MS: number;
+export const USAGE_COUNT_MAX: number;
+export const USAGE_MODELS_MAX: number;
+export const TRANSCRIPT_READ_MAX_BYTES: number;
 export function emptyState(): EffortState;
 export function stepForTool(toolName: string, toolInput: unknown, currentStep: EffortCategory): EffortCategory | null;
 export function applyEvent(state: EffortState, event: HookEvent, now: number): void;
 export function take(state: EffortState, now: number): EffortSegment[];
+export function usageOfLine(line: string, since: number): { id: string; counts: UsageCounts } | null;
+export function absorbTranscript(state: EffortState, lines: readonly string[]): void;
+export function usageSource(env: Record<string, string | undefined>): ModelUsageSource;
+export function usageReport(state: EffortState, source: ModelUsageSource): ModelUsage[];
+export function readNewTranscriptLines(state: EffortState, file: string): string[];
 export function projectRootFor(dir: string): string;
 export function stateFileFor(projectDir: string, baseDir?: string): string;
 export function loadState(file: string): EffortState;

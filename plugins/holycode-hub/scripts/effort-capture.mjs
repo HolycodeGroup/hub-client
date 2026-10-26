@@ -16,10 +16,20 @@
 // code or file content. It is emptied when the claim's lease expires (the Hub refuses those
 // segments) and when the story is completed or released. Hooks never block and never fail loudly.
 //
+// Model usage (HH-171): at each Stop and session end, and before a usage report, the NEW lines of
+// the session transcript are read (from a stored byte offset) and each assistant message's model
+// and token counts after the claim are kept — keyed by message id, so a message streamed over
+// several lines counts once (its last line wins). The buffer then holds only the model id and four
+// counts per message, never the message text. The report is the attempt's CUMULATIVE totals per
+// model (the Hub keeps the larger value, so sending it again is harmless); it is emptied with the
+// segments. A transcript that cannot be read is skipped silently.
+//
 // CLI: `effort-capture.mjs hook` (reads the hook event JSON on stdin) · `effort-capture.mjs take`
-// (prints the pending segments as a JSON array for the work_* call; `[]` when none).
+// (prints the pending segments as a JSON array for the work_* call; `[]` when none) ·
+// `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none).
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -32,11 +42,24 @@ export const LEASE_TTL_MS = 8 * 60 * 60 * 1000;
 /** Slivers shorter than this are not worth a segment. */
 export const MIN_SEGMENT_MS = 1000;
 
+/** The largest count the Hub accepts per counter (HH-170), and the most models per report. */
+export const USAGE_COUNT_MAX = 2_000_000_000;
+export const USAGE_MODELS_MAX = 20;
+/** At most this many new transcript bytes are read per hook run — the rest waits for the next one. */
+export const TRANSCRIPT_READ_MAX_BYTES = 32 * 1024 * 1024;
+/** A model id the Hub accepts (HH-170); anything else (e.g. "<synthetic>") is not a model call. */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}$/;
+
 const TEST_COMMAND = /\b(test|tests|vitest|jest|playwright|pytest|lint|eslint|tsc|typecheck|go test|cargo test)\b/;
 
 /** A fresh, story-less state. */
 export function emptyState() {
-  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [] };
+  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage() };
+}
+
+/** No usage yet: per message id `[model, input, output, cacheCreation, cacheRead]`; read offsets per transcript. */
+function emptyUsage() {
+  return { messages: {}, transcripts: {}, transcript: null };
 }
 
 const iso = (ms) => new Date(ms).toISOString();
@@ -104,7 +127,7 @@ function claimOf(toolInput, toolResponse, now) {
   const key = payload?.story?.key ?? (/"code"|error/i.test(JSON.stringify(toolResponse ?? '')) ? null : toolInput?.story_id);
   if (typeof key !== 'string' || key === '') return null;
   const expires = Date.parse(payload?.lease?.expires_at ?? '');
-  return { key, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires };
+  return { key, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires, claimedAt: now };
 }
 
 function safeJson(text) {
@@ -129,6 +152,7 @@ function sentSeqs(toolInput) {
  */
 export function applyEvent(state, event, now) {
   expireIfDue(state, now);
+  if (typeof event.transcript_path === 'string') state.usage.transcript = event.transcript_path;
   const name = event.hook_event_name;
   const tool = String(event.tool_name ?? '');
   if (name === 'PostToolUse' && /__work_claim$/.test(tool)) {
@@ -185,6 +209,95 @@ export function take(state, now) {
   return state.pending;
 }
 
+// ---- model usage (HH-171) ----------------------------------------------------------------------
+
+const count = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
+
+/**
+ * One transcript line's usage — `{ id, counts: [model, input, output, cacheCreation, cacheRead] }`
+ * for an assistant message at or after `since` — or null. Only these fields are read.
+ */
+export function usageOfLine(line, since) {
+  const entry = safeJson(line);
+  const message = entry?.message;
+  if (entry?.type !== 'assistant' || message === null || typeof message !== 'object') return null;
+  const at = Date.parse(entry.timestamp ?? '');
+  if (Number.isNaN(at) || at < since) return null;
+  const { id, model, usage } = message;
+  if (typeof id !== 'string' || typeof model !== 'string' || !MODEL_ID.test(model) || usage === null || typeof usage !== 'object') return null;
+  return {
+    id,
+    counts: [model, count(usage.input_tokens), count(usage.output_tokens), count(usage.cache_creation_input_tokens), count(usage.cache_read_input_tokens)],
+  };
+}
+
+/** Keeps the usage of each assistant message in `lines` after the claim (the last line of a message wins). */
+export function absorbTranscript(state, lines) {
+  if (state.story === null) return;
+  for (const line of lines) {
+    const usage = usageOfLine(line, state.story.claimedAt ?? 0);
+    if (usage !== null) state.usage.messages[usage.id] = usage.counts;
+  }
+}
+
+/** How the member pays for the model: an API key in the environment is per token, else a subscription. */
+export function usageSource(env) {
+  return typeof env.ANTHROPIC_API_KEY === 'string' && env.ANTHROPIC_API_KEY !== '' ? 'API_KEY' : 'SUBSCRIPTION';
+}
+
+/** The `model_usage` report: per model, the attempt's cumulative counts (one request per message). */
+export function usageReport(state, source) {
+  const byModel = new Map();
+  for (const [model, input, output, cacheCreation, cacheRead] of Object.values(state.usage.messages)) {
+    const total = byModel.get(model) ?? { model, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, source };
+    total.input_tokens += input;
+    total.output_tokens += output;
+    total.cache_creation_tokens += cacheCreation;
+    total.cache_read_tokens += cacheRead;
+    total.requests += 1;
+    byModel.set(model, total);
+  }
+  const clamp = (n) => Math.min(n, USAGE_COUNT_MAX);
+  return [...byModel.values()]
+    .sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model))
+    .slice(0, USAGE_MODELS_MAX)
+    .map((t) => ({ ...t, input_tokens: clamp(t.input_tokens), output_tokens: clamp(t.output_tokens), cache_creation_tokens: clamp(t.cache_creation_tokens), cache_read_tokens: clamp(t.cache_read_tokens), requests: clamp(t.requests) }));
+}
+
+/**
+ * The complete lines a transcript gained since the last read (the stored offset moves past them; a
+ * trailing partial line waits). A shorter file than the offset was replaced: it is read from the start.
+ */
+export function readNewTranscriptLines(state, file) {
+  const fd = openSync(file, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const stored = state.usage.transcripts[file] ?? 0;
+    const from = stored > size ? 0 : stored;
+    const length = Math.min(size - from, TRANSCRIPT_READ_MAX_BYTES);
+    if (length <= 0) return [];
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, from);
+    const end = buffer.lastIndexOf(0x0a);
+    if (end === -1) return [];
+    state.usage.transcripts[file] = from + end + 1;
+    return buffer.subarray(0, end).toString('utf8').split('\n');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Reads the session transcript's new lines into the usage; a failure leaves the usage as it was. */
+function absorbSessionTranscript(state) {
+  const file = state.usage.transcript;
+  if (state.story === null || typeof file !== 'string') return;
+  try {
+    absorbTranscript(state, readNewTranscriptLines(state, file));
+  } catch {
+    // Unreadable or gone: the usage of this stretch is lost, the session goes on.
+  }
+}
+
 // ---- persistence + CLI (thin) ------------------------------------------------------------------
 
 /**
@@ -209,7 +322,9 @@ export function stateFileFor(projectDir, baseDir = process.env.HOLYCODE_EFFORT_D
 
 export function loadState(file) {
   const parsed = safeJson(readOr(file));
-  return parsed !== null && typeof parsed === 'object' ? { ...emptyState(), ...parsed } : emptyState();
+  if (parsed === null || typeof parsed !== 'object') return emptyState();
+  // A buffer written before HH-171 has no usage: start it empty.
+  return { ...emptyState(), ...parsed, usage: { ...emptyUsage(), ...(parsed.usage ?? {}) } };
 }
 
 function readOr(file) {
@@ -234,6 +349,7 @@ function main(argv, stdin, now) {
     const file = stateFileFor(event.cwd ?? process.cwd());
     const state = loadState(file);
     applyEvent(state, event, now);
+    if (event.hook_event_name === 'Stop' || event.hook_event_name === 'SessionEnd') absorbSessionTranscript(state);
     saveState(file, state);
     return '';
   }
@@ -244,6 +360,14 @@ function main(argv, stdin, now) {
     saveState(file, state);
     return JSON.stringify(segments);
   }
+  if (command === 'usage') {
+    const file = stateFileFor(process.cwd());
+    const state = loadState(file);
+    expireIfDue(state, now);
+    absorbSessionTranscript(state);
+    saveState(file, state);
+    return JSON.stringify(usageReport(state, usageSource(process.env)));
+  }
   return '';
 }
 
@@ -253,6 +377,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     const stdin = process.argv[2] === 'hook' ? readFileSync(0, 'utf8') : '';
     process.stdout.write(main(process.argv.slice(2), stdin, Date.now()));
   } catch {
-    if (process.argv[2] === 'take') process.stdout.write('[]');
+    if (process.argv[2] === 'take' || process.argv[2] === 'usage') process.stdout.write('[]');
   }
 }
