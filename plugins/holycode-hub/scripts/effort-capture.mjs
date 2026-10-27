@@ -24,6 +24,15 @@
 // model (the Hub keeps the larger value, so sending it again is harmless); it is emptied with the
 // segments. A transcript that cannot be read is skipped silently.
 //
+// Delivery (HH-199): the measured effort no longer depends on whoever calls the Hub remembering the
+// `take` / `usage` steps. A PreToolUse hook on work_progress / work_verify / work_complete for the
+// claimed story checks the call: when it lacks pending segments or the model usage, the hook refuses
+// it ONCE with the exact fields to add (a documented deny; it never approves or widens a permission),
+// and the agent repeats the call with them; a human_ms / ai_ms estimate goes when measured segments
+// go along. A second attempt is never refused, so nothing loops. After a work_complete, a PostToolUse
+// hook says so visibly when measured effort still did not travel with it (the Hub accepts it only up
+// to completion) instead of losing it silently. Counts and timestamps only, as before.
+//
 // CLI: `effort-capture.mjs hook` (reads the hook event JSON on stdin) · `effort-capture.mjs take`
 // (prints the pending segments as a JSON array for the work_* call; `[]` when none) ·
 // `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none).
@@ -54,7 +63,7 @@ const TEST_COMMAND = /\b(test|tests|vitest|jest|playwright|pytest|lint|eslint|ts
 
 /** A fresh, story-less state. */
 export function emptyState() {
-  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage() };
+  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {} };
 }
 
 /** No usage yet: per message id `[model, input, output, cacheCreation, cacheRead]`; read offsets per transcript. */
@@ -127,7 +136,8 @@ function claimOf(toolInput, toolResponse, now) {
   const key = payload?.story?.key ?? (/"code"|error/i.test(JSON.stringify(toolResponse ?? '')) ? null : toolInput?.story_id);
   if (typeof key !== 'string' || key === '') return null;
   const expires = Date.parse(payload?.lease?.expires_at ?? '');
-  return { key, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires, claimedAt: now };
+  const id = typeof payload?.story?.id === 'string' ? payload.story.id : null;
+  return { key, id, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires, claimedAt: now };
 }
 
 function safeJson(text) {
@@ -181,7 +191,8 @@ export function applyEvent(state, event, now) {
       closeOpen(state, now);
       openInterval(state, 'AI', now);
     }
-    applyWorkCall(state, tool, event.tool_input, now);
+    // HH-199 — a call the Hub refused delivered nothing: the buffer stays for the retry.
+    if (event.tool_failed !== true) applyWorkCall(state, tool, event.tool_input, now);
     setStep(state, stepForTool(tool, event.tool_input, state.step), now);
   }
 }
@@ -191,6 +202,7 @@ function applyWorkCall(state, tool, toolInput, now) {
   if (!/__work_(progress|verify|complete|release)$/.test(tool)) return;
   const sent = sentSeqs(toolInput);
   state.pending = state.pending.filter((s) => !sent.has(s.seq));
+  state.reminded = {};
   if (/__work_(complete|release)$/.test(tool)) {
     Object.assign(state, emptyState(), { seq: state.seq });
     return;
@@ -207,6 +219,75 @@ export function take(state, now) {
     openInterval(state, actor, now);
   }
   return state.pending;
+}
+
+// ---- delivery (HH-199) -------------------------------------------------------------------------
+
+/** The work_* calls that carry measured effort to the Hub. */
+const DELIVERING_TOOL = /__work_(progress|verify|complete)$/;
+
+/** Whether a work_* call names the claimed story (by key or by id). */
+function namesClaimedStory(state, toolInput) {
+  const named = toolInput?.story_id;
+  return state.story !== null && typeof named === 'string' && (named === state.story.key || named === state.story.id);
+}
+
+/**
+ * The input a delivering work_* call should carry: the caller's own input plus the pending segments it
+ * lacks (by seq) and, for verify / complete, the model usage when it carries none. When measured
+ * segments go along, a human_ms / ai_ms estimate is dropped — measured time wins. Null when there is
+ * nothing to add (another tool, another story, nothing measured), so the call runs untouched.
+ */
+export function attachEffort(state, toolName, toolInput, now, source) {
+  if (!DELIVERING_TOOL.test(toolName) || !namesClaimedStory(state, toolInput)) return null;
+  const sent = sentSeqs(toolInput);
+  const segments = take(state, now).filter((segment) => !sent.has(segment.seq));
+  const usage = /__work_progress$/.test(toolName) || Array.isArray(toolInput.model_usage) ? [] : usageReport(state, source);
+  if (segments.length === 0 && usage.length === 0) return null;
+  const next = { ...toolInput };
+  if (segments.length > 0) {
+    next.segments = [...(Array.isArray(toolInput.segments) ? toolInput.segments : []), ...segments];
+    delete next.human_ms;
+    delete next.ai_ms;
+  }
+  if (usage.length > 0) next.model_usage = usage;
+  return next;
+}
+
+/**
+ * Why a delivering call should be repeated with the measured effort, naming the exact fields to add —
+ * or null to let it run. Only the first attempt per tool is refused (`state.reminded`, reset by a
+ * successful work_* call), so a call that cannot carry them still goes through.
+ */
+export function deliveryReminder(state, toolName, toolInput, now, source) {
+  const next = attachEffort(state, toolName, toolInput, now, source);
+  if (next === null) return null;
+  state.reminded = state.reminded ?? {};
+  if (state.reminded[toolName] === true) return null;
+  state.reminded[toolName] = true;
+  const add = {};
+  if (next.segments !== toolInput.segments) add.segments = next.segments;
+  if (next.model_usage !== toolInput.model_usage) add.model_usage = next.model_usage;
+  const drop = ['human_ms', 'ai_ms'].filter((field) => field in toolInput && !(field in next));
+  return [
+    `holycode-hub: this call leaves out the effort measured on ${state.story.key}. Call it again with these fields added`,
+    drop.length > 0 ? ` and without ${drop.join(' / ')}` : '',
+    ` (counts and timestamps only): ${JSON.stringify(add)}`,
+  ].join('');
+}
+
+/**
+ * After a work_complete: what was measured but did not travel with it (the Hub accepts effort only up
+ * to completion), as a short note for the developer — or null when everything went along.
+ */
+export function undeliveredNote(state, toolInput, source) {
+  if (!namesClaimedStory(state, toolInput)) return null;
+  const sent = sentSeqs(toolInput);
+  const segments = state.pending.filter((segment) => !sent.has(segment.seq)).length;
+  const usage = Array.isArray(toolInput?.model_usage) && toolInput.model_usage.length > 0 ? 0 : usageReport(state, source).length;
+  if (segments === 0 && usage === 0) return null;
+  const what = [segments > 0 ? `${segments} measured time segment${segments === 1 ? '' : 's'}` : null, usage > 0 ? 'the token counts' : null].filter(Boolean).join(' and ');
+  return `holycode-hub: ${state.story.key} was completed without ${what}; the Hub accepts them only up to completion, so they are not recorded.`;
 }
 
 // ---- model usage (HH-171) ----------------------------------------------------------------------
@@ -342,16 +423,42 @@ export function saveState(file, state) {
   renameSync(tmp, file);
 }
 
+/** A tool response that reports a failure (a refused work_complete leaves the buffer for a retry). */
+function failed(response) {
+  const value = typeof response === 'string' ? safeJson(response) ?? response : response;
+  return value?.isError === true || /"code"\s*:\s*"(VALIDATION|FORBIDDEN|CONFLICT|BUSINESS|NOT_FOUND)_/.test(JSON.stringify(value ?? ''));
+}
+
+/** The PreToolUse answer for a delivering call (empty: run it untouched). */
+function attachOutput(state, event, now) {
+  absorbSessionTranscript(state);
+  const tool = String(event.tool_name);
+  const reason = deliveryReminder(state, tool, event.tool_input ?? {}, now, usageSource(process.env));
+  if (reason === null) return '';
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+}
+
 function main(argv, stdin, now) {
   const command = argv[0];
   if (command === 'hook') {
     const event = safeJson(stdin) ?? {};
     const file = stateFileFor(event.cwd ?? process.cwd());
     const state = loadState(file);
+    const tool = String(event.tool_name ?? '');
+    let out = '';
+    if (event.hook_event_name === 'PreToolUse' && DELIVERING_TOOL.test(tool)) {
+      out = attachOutput(state, event, now);
+    } else if (event.hook_event_name === 'PostToolUse' && /__work_/.test(tool) && failed(event.tool_response)) {
+      event.tool_failed = true;
+    } else if (event.hook_event_name === 'PostToolUse' && /__work_complete$/.test(tool)) {
+      absorbSessionTranscript(state);
+      const note = undeliveredNote(state, event.tool_input, usageSource(process.env));
+      if (note !== null) out = JSON.stringify({ systemMessage: note });
+    }
     applyEvent(state, event, now);
     if (event.hook_event_name === 'Stop' || event.hook_event_name === 'SessionEnd') absorbSessionTranscript(state);
     saveState(file, state);
-    return '';
+    return out;
   }
   if (command === 'take') {
     const file = stateFileFor(process.cwd());

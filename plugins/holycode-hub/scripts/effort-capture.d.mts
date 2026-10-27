@@ -4,13 +4,15 @@ export type EffortCategory = 'PLANNING' | 'IMPLEMENTATION' | 'REVIEW_GATES' | 'W
 export type EffortSegment = { seq: number; actor: EffortActor; category: EffortCategory; started_at: string; ended_at: string };
 export type UsageCounts = [model: string, input: number, output: number, cacheCreation: number, cacheRead: number];
 export type EffortState = {
-  story: { key: string; leaseExpiresAt: number; claimedAt?: number } | null;
+  story: { key: string; id?: string | null; leaseExpiresAt: number; claimedAt?: number } | null;
   step: EffortCategory;
   open: { actor: EffortActor; category: EffortCategory; since: number } | null;
   seq: number;
   pending: EffortSegment[];
   /** HH-171 — per message id its model and counts; read offsets per transcript; the session transcript. */
   usage: { messages: Record<string, UsageCounts>; transcripts: Record<string, number>; transcript: string | null };
+  /** HH-199 — the delivering tools refused once for missing effort (reset by a successful work_* call). */
+  reminded?: Record<string, boolean>;
 };
 export type HookEvent = {
   hook_event_name: string;
@@ -19,6 +21,8 @@ export type HookEvent = {
   tool_name?: string;
   tool_input?: unknown;
   tool_response?: unknown;
+  /** HH-199 — set by the CLI when the work_* call failed (it delivered nothing). */
+  tool_failed?: boolean;
 };
 export type ModelUsageSource = 'API_KEY' | 'SUBSCRIPTION';
 export type ModelUsage = {
@@ -49,4 +53,10 @@ export function readNewTranscriptLines(state: EffortState, file: string): string
 export function projectRootFor(dir: string): string;
 export function stateFileFor(projectDir: string, baseDir?: string): string;
 export function loadState(file: string): EffortState;
+/** HH-199 — the call input with the measured effort it lacks added, or null when nothing is missing. */
+export function attachEffort(state: EffortState, toolName: string, toolInput: Record<string, unknown>, now: number, source: ModelUsageSource): Record<string, unknown> | null;
+/** HH-199 — why a delivering call should be repeated with the measured effort (first attempt per tool only), or null. */
+export function deliveryReminder(state: EffortState, toolName: string, toolInput: Record<string, unknown>, now: number, source: ModelUsageSource): string | null;
+/** HH-199 — after a work_complete: the note for measured effort that did not travel with it, or null. */
+export function undeliveredNote(state: EffortState, toolInput: unknown, source: ModelUsageSource): string | null;
 export function saveState(file: string, state: EffortState): void;
