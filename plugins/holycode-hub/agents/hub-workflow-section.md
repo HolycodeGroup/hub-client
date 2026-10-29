@@ -1,5 +1,5 @@
 <!-- holycode-hub:start -->
-<!-- holycode-hub:block-version: 2 -->
+<!-- holycode-hub:block-version: 3 -->
 ## Holycode Hub workflow
 
 This repository is linked to a Holycode Hub project — the Hub holds the backlog, estimates and
@@ -19,6 +19,10 @@ Project status: `project_status { project_id }`.
 
 Agents with the Holycode Hub plugin (Claude Code) use the slash commands instead:
 `/holycode-hub:claim`, `/holycode-hub:verify`, `/holycode-hub:complete`, `/holycode-hub:status`.
+
+**Outdated plugin:** when any Hub result carries `client_outdated`, tell the developer the plugin
+is outdated — installed `client_outdated.installed`, published `client_outdated.published` — and to
+run `/holycode-hub:update`, then restart Claude Code. Give no other update steps.
 
 ### Git conventions (apply from the very first commit)
 

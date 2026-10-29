@@ -8,9 +8,15 @@
 // step fails and the report says so. It makes no Hub call and changes nothing but what the CLI does.
 // A restart is still needed — Claude Code loads plugins only at startup.
 //
+// HH-247 — after an update it also resolves the NEW version's plugin directory from
+// `claude plugin list --json` (the installed entry with the new version) and checks that it exists,
+// so the update card can sync the command cards into that directory's empty `commands-cache/`. It
+// never guesses a path: when the CLI does not name an existing directory, the report says so.
+//
 // CLI: `update-plugin.mjs`. Exit 0 = updated or already current; exit 1 = a step failed (the report
 // names it and prints the manual steps).
 import { spawnSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
@@ -45,6 +51,36 @@ export function lastJsonLine(stdout) {
   return null;
 }
 
+/** The JSON array the CLI prints for `--json` listings, or null. */
+export function jsonArray(stdout) {
+  try {
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when `dir` is an existing directory; tests pass their own check. */
+export function realIsDir(dir) {
+  return existsSync(dir) && statSync(dir).isDirectory();
+}
+
+/**
+ * The installed directory of `version` as the CLI lists it, verified to exist.
+ *
+ * @returns {{ pluginDir: string } | { pluginDirError: string }}
+ */
+export function resolvePluginDir(version, run = realRun, isDir = realIsDir) {
+  const out = run(['plugin', 'list', '--json']);
+  const entries = out.status === 0 && !out.error ? jsonArray(out.stdout) : null;
+  if (entries === null) return { pluginDirError: '`claude plugin list --json` gave no plugin list' };
+  const entry = entries.find((e) => e?.id === PLUGIN_ID && e?.version === version);
+  if (typeof entry?.installPath !== 'string') return { pluginDirError: `the CLI lists no ${PLUGIN_ID} ${version} install` };
+  if (!isDir(entry.installPath)) return { pluginDirError: `the listed directory ${entry.installPath} does not exist` };
+  return { pluginDir: entry.installPath };
+}
+
 /** The last non-empty line of a CLI message — the line that says what happened. */
 function lastLine(message) {
   const lines = String(message ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -64,17 +100,20 @@ function runStep(run, step, args) {
 }
 
 /**
- * Refreshes the marketplace, then updates the plugin.
+ * Refreshes the marketplace, then updates the plugin; after an update, resolves the new version's
+ * plugin directory (`pluginDir`, or `pluginDirError` saying why it could not).
  *
- * @returns {{ ok: true, oldVersion: string, newVersion: string, upToDate: boolean } | { ok: false, step: 'cli'|'marketplace'|'plugin', reason: string }}
+ * @returns {{ ok: true, oldVersion: string, newVersion: string, upToDate: boolean, pluginDir?: string, pluginDirError?: string } | { ok: false, step: 'cli'|'marketplace'|'plugin', reason: string }}
  */
-export function updatePlugin(run = realRun) {
+export function updatePlugin(run = realRun, isDir = realIsDir) {
   const marketplace = runStep(run, 'marketplace', ['plugin', 'marketplace', 'update', MARKETPLACE, '--json']);
   if (marketplace.failure) return { ok: false, ...marketplace.failure };
   const plugin = runStep(run, 'plugin', ['plugin', 'update', PLUGIN_ID, '--json']);
   if (plugin.failure) return { ok: false, ...plugin.failure };
   const { oldVersion, newVersion, updateOutcome } = plugin.result;
-  return { ok: true, oldVersion, newVersion, upToDate: updateOutcome === 'up_to_date' || oldVersion === newVersion };
+  const upToDate = updateOutcome === 'up_to_date' || oldVersion === newVersion;
+  if (upToDate) return { ok: true, oldVersion, newVersion, upToDate };
+  return { ok: true, oldVersion, newVersion, upToDate, ...resolvePluginDir(newVersion, run, isDir) };
 }
 
 const STEP_LABEL = { cli: 'Claude Code CLI', marketplace: 'Marketplace refresh', plugin: 'Plugin update' };
@@ -82,7 +121,13 @@ const STEP_LABEL = { cli: 'Claude Code CLI', marketplace: 'Marketplace refresh',
 /** The report the developer sees. */
 export function formatResult(result) {
   if (result.ok && result.upToDate) return `✔ ${MARKETPLACE} is already current (${result.newVersion}). Nothing to restart.`;
-  if (result.ok) return `✔ ${MARKETPLACE} updated ${result.oldVersion} → ${result.newVersion}. Restart Claude Code to load it.`;
+  if (result.ok) {
+    const updated = `✔ ${MARKETPLACE} updated ${result.oldVersion} → ${result.newVersion}. Restart Claude Code to load it.`;
+    const dir = result.pluginDir
+      ? `New plugin directory: ${result.pluginDir}`
+      : `New plugin directory not found: ${result.pluginDirError}`;
+    return `${updated}\n${dir}`;
+  }
   return [
     `✘ ${STEP_LABEL[result.step]} failed: ${result.reason}`,
     'Update by hand instead:',
