@@ -33,6 +33,14 @@
 // hook says so visibly when measured effort still did not travel with it (the Hub accepts it only up
 // to completion) instead of losing it silently. Counts and timestamps only, as before.
 //
+// Several stories (HH-290): the buffer measures ONE active story at a time and PARKS every other story
+// it holds (`held`, keyed by story key) with its pending segments and usage — nothing is ever dropped
+// because another story was claimed. A claim of a NEW story parks the active one and makes the new one
+// active; a claim of a story already held (a standing order's re-read, which only renews its lease)
+// switches nothing. Work on a held story's worktree (a tool input naming `.worktrees/<key>/`) makes it
+// the active story. The stories a standing order hands out are held from its claim on. A work_* call
+// delivers the effort of the story it names — active or parked — and never another story's segments.
+//
 // CLI: `effort-capture.mjs hook` (reads the hook event JSON on stdin) · `effort-capture.mjs take`
 // (prints the pending segments as a JSON array for the work_* call; `[]` when none) ·
 // `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none).
@@ -63,7 +71,13 @@ const TEST_COMMAND = /\b(test|tests|vitest|jest|playwright|pytest|lint|eslint|ts
 
 /** A fresh, story-less state. */
 export function emptyState() {
-  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {} };
+  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {}, held: {} };
+}
+
+/** The active story ends: its fields reset; the seq counter, the parked stories and the transcript offsets stay. */
+function clearActive(state) {
+  Object.assign(state, { story: null, step: 'PLANNING', open: null, pending: [], reminded: {} });
+  state.usage.messages = {};
 }
 
 /** No usage yet: per message id `[model, input, output, cacheCreation, cacheRead]`; read offsets per transcript. */
@@ -88,9 +102,70 @@ function openInterval(state, actor, at) {
   state.open = { actor, category: state.step, since: at };
 }
 
-/** Drops everything when the lease has expired — the Hub would refuse those segments. */
+/** Drops each story whose lease has expired, active or parked — the Hub would refuse its segments. */
 function expireIfDue(state, now) {
-  if (state.story !== null && now > state.story.leaseExpiresAt) Object.assign(state, emptyState());
+  state.held = state.held ?? {};
+  for (const [key, slot] of Object.entries(state.held)) if (now > slot.story.leaseExpiresAt) delete state.held[key];
+  if (state.story !== null && now > state.story.leaseExpiresAt) clearActive(state);
+}
+
+// ---- several stories (HH-290) ------------------------------------------------------------------
+
+/** Parks the active story (its open interval closed at `now`) so another one can be measured. */
+function parkActive(state, now) {
+  if (state.story === null) return;
+  closeOpen(state, now);
+  state.held[state.story.key] = { story: state.story, step: state.step, pending: state.pending, messages: state.usage.messages, parkedAt: now };
+  clearActive(state);
+}
+
+/** Makes a parked story the active one; `actor` reopens the interval that was running, if any. */
+function resume(state, key, actor, now) {
+  const slot = state.held[key];
+  delete state.held[key];
+  Object.assign(state, { story: slot.story, step: slot.step, pending: slot.pending, open: null, reminded: {} });
+  state.usage.messages = slot.messages;
+  if (actor !== null) openInterval(state, actor, now);
+}
+
+/** Switches measurement to the parked story `key`, keeping the running actor. */
+function switchTo(state, key, now) {
+  const actor = state.open?.actor ?? null;
+  parkActive(state, now);
+  resume(state, key, actor, now);
+}
+
+/** After the active story ended: the most recently parked story (if any) becomes the active one. */
+function resumeLatest(state, actor, now) {
+  const latest = Object.entries(state.held).sort(([, a], [, b]) => b.parkedAt - a.parkedAt)[0];
+  if (latest !== undefined) resume(state, latest[0], actor, now);
+}
+
+/** Parks a story a standing order handed out, unless it is already held. */
+function holdHandedOut(state, entry, claim) {
+  if (typeof entry?.key !== 'string' || entry.key === claim.key || entry.key === state.story?.key || state.held[entry.key] !== undefined) return;
+  const story = { key: entry.key, id: typeof entry.id === 'string' ? entry.id : null, leaseExpiresAt: claim.leaseExpiresAt, claimedAt: claim.claimedAt };
+  state.held[entry.key] = { story, step: 'PLANNING', pending: [], messages: {}, parkedAt: claim.claimedAt };
+}
+
+const WORKTREE_KEY = /\.worktrees\/([A-Za-z][A-Za-z0-9]*-\d+)(?=[/\s"'`]|$)/g;
+
+/** The parked story whose worktree a tool input names (its paths or command), or null. */
+export function worktreeStoryOf(state, toolInput) {
+  const text = [toolInput?.file_path, toolInput?.notebook_path, toolInput?.path, toolInput?.command].filter((v) => typeof v === 'string').join('\n');
+  const parked = new Map(Object.keys(state.held ?? {}).map((key) => [key.toLowerCase(), key]));
+  for (const [, name] of text.matchAll(WORKTREE_KEY)) {
+    const key = parked.get(name.toLowerCase());
+    if (key !== undefined) return key;
+  }
+  return null;
+}
+
+/** The parked story a work_* call names (by key or id), or null. */
+function heldNamed(state, toolInput) {
+  const named = toolInput?.story_id;
+  if (typeof named !== 'string') return null;
+  return Object.keys(state.held ?? {}).find((key) => key === named || state.held[key].story.id === named) ?? null;
 }
 
 /** The category a tool use moves the step to, or null (unchanged). */
@@ -137,7 +212,26 @@ function claimOf(toolInput, toolResponse, now) {
   if (typeof key !== 'string' || key === '') return null;
   const expires = Date.parse(payload?.lease?.expires_at ?? '');
   const id = typeof payload?.story?.id === 'string' ? payload.story.id : null;
-  return { key, id, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires, claimedAt: now };
+  const handedOut = Array.isArray(payload?.standing_order?.handed_out) ? payload.standing_order.handed_out : [];
+  return { key, id, leaseExpiresAt: Number.isNaN(expires) ? now + LEASE_TTL_MS : expires, claimedAt: now, handedOut };
+}
+
+/**
+ * A successful work_claim (HH-290): a new story parks the active one and becomes active; a story
+ * already held only has its lease view renewed; a standing order's other stories are held from now on.
+ */
+function applyClaim(state, claim, now) {
+  const { handedOut, ...story } = claim;
+  if (story.key === state.story?.key) {
+    state.story.leaseExpiresAt = story.leaseExpiresAt;
+  } else if (state.held[story.key] !== undefined) {
+    state.held[story.key].story.leaseExpiresAt = story.leaseExpiresAt;
+  } else {
+    parkActive(state, now);
+    state.story = story;
+    openInterval(state, 'AI', now); // the claim happens inside an agent turn
+  }
+  for (const entry of handedOut) holdHandedOut(state, entry, claim);
 }
 
 function safeJson(text) {
@@ -165,14 +259,20 @@ export function applyEvent(state, event, now) {
   if (typeof event.transcript_path === 'string') state.usage.transcript = event.transcript_path;
   const name = event.hook_event_name;
   const tool = String(event.tool_name ?? '');
-  if (name === 'PostToolUse' && /__work_claim$/.test(tool)) {
+  if (name === 'PostToolUse' && /__work_claim$/.test(tool) && event.tool_failed !== true) {
     const claim = claimOf(event.tool_input, event.tool_response, now);
-    if (claim !== null && claim.key !== state.story?.key) {
-      Object.assign(state, emptyState(), { seq: state.seq });
-      state.story = claim;
-      openInterval(state, 'AI', now); // the claim happens inside an agent turn
+    if (claim !== null) {
+      applyClaim(state, claim, now);
       return;
     }
+  }
+  if (name === 'PostToolUse' && event.tool_failed !== true && heldNamed(state, event.tool_input) !== null && /__work_/.test(tool)) {
+    applyWorkCall(state, tool, event.tool_input, now);
+    return;
+  }
+  if (name === 'PostToolUse') {
+    const worktree = worktreeStoryOf(state, event.tool_input);
+    if (worktree !== null) switchTo(state, worktree, now);
   }
   if (state.story === null) return;
   if (name === 'UserPromptSubmit') {
@@ -197,14 +297,31 @@ export function applyEvent(state, event, now) {
   }
 }
 
-/** A successful work_* call: drop what it sent, renew the lease view, end on complete/release. */
+/**
+ * A successful work_* call: drop what it sent, renew the lease view, end on complete/release — on the
+ * parked story it names (HH-290), else on the active one. When the active story ends, the most recently
+ * parked story becomes active.
+ */
 function applyWorkCall(state, tool, toolInput, now) {
   if (!/__work_(progress|verify|complete|release)$/.test(tool)) return;
   const sent = sentSeqs(toolInput);
+  const ends = /__work_(complete|release)$/.test(tool);
+  const parked = heldNamed(state, toolInput);
+  if (parked !== null) {
+    const slot = state.held[parked];
+    if (ends) delete state.held[parked];
+    else {
+      slot.pending = slot.pending.filter((s) => !sent.has(s.seq));
+      slot.story.leaseExpiresAt = now + LEASE_TTL_MS;
+    }
+    return;
+  }
   state.pending = state.pending.filter((s) => !sent.has(s.seq));
   state.reminded = {};
-  if (/__work_(complete|release)$/.test(tool)) {
-    Object.assign(state, emptyState(), { seq: state.seq });
+  if (ends) {
+    const actor = state.open?.actor ?? null;
+    clearActive(state);
+    resumeLatest(state, actor, now);
     return;
   }
   state.story.leaseExpiresAt = now + LEASE_TTL_MS;
@@ -233,25 +350,57 @@ function namesClaimedStory(state, toolInput) {
 }
 
 /**
+ * The measured effort of the story a work_* call names (HH-290): the active story's (its open interval
+ * cut at `now`) or a parked one's — or null when the call names neither.
+ */
+function namedEffort(state, toolInput, now) {
+  if (namesClaimedStory(state, toolInput)) return { key: state.story.key, segments: take(state, now), messages: state.usage.messages };
+  const parked = heldNamed(state, toolInput);
+  if (parked === null) return null;
+  const slot = state.held[parked];
+  return { key: parked, segments: slot.pending, messages: slot.messages };
+}
+
+/** The seqs pending on every story but `key` — segments a call for `key` must never carry. */
+function otherStoriesSeqs(state, key) {
+  const pending = [...(state.story !== null && state.story.key !== key ? state.pending : [])];
+  for (const [held, slot] of Object.entries(state.held ?? {})) if (held !== key) pending.push(...slot.pending);
+  return new Set(pending.map((s) => s.seq));
+}
+
+/**
  * The input a delivering work_* call should carry: the caller's own input plus the pending segments it
- * lacks (by seq) and, for verify / complete, the model usage when it carries none. When measured
- * segments go along, a human_ms / ai_ms estimate is dropped — measured time wins. Null when there is
- * nothing to add (another tool, another story, nothing measured), so the call runs untouched.
+ * lacks (by seq) and, for verify / complete, the model usage when it carries none — of the story the
+ * call names, active or parked; segments measured on another story are taken out (HH-290). When
+ * measured segments go along, a human_ms / ai_ms estimate is dropped — measured time wins. Null when
+ * there is nothing to change (another tool, an unknown story, nothing measured), so the call runs untouched.
  */
 export function attachEffort(state, toolName, toolInput, now, source) {
-  if (!DELIVERING_TOOL.test(toolName) || !namesClaimedStory(state, toolInput)) return null;
-  const sent = sentSeqs(toolInput);
-  const segments = take(state, now).filter((segment) => !sent.has(segment.seq));
-  const usage = /__work_progress$/.test(toolName) || Array.isArray(toolInput.model_usage) ? [] : usageReport(state, source);
-  if (segments.length === 0 && usage.length === 0) return null;
+  if (!DELIVERING_TOOL.test(toolName)) return null;
+  const effort = namedEffort(state, toolInput, now);
+  if (effort === null) return null;
+  const others = otherStoriesSeqs(state, effort.key);
+  const carried = Array.isArray(toolInput.segments) ? toolInput.segments : [];
+  const own = carried.filter((segment) => !others.has(segment?.seq));
+  const sent = new Set(own.map((segment) => segment?.seq));
+  const segments = effort.segments.filter((segment) => !sent.has(segment.seq));
+  const usage = /__work_progress$/.test(toolName) || Array.isArray(toolInput.model_usage) ? [] : usageOf(effort.messages, source);
+  const foreign = own.length < carried.length;
+  if (segments.length === 0 && usage.length === 0 && !foreign) return null;
   const next = { ...toolInput };
+  if (foreign) next.segments = own;
   if (segments.length > 0) {
-    next.segments = [...(Array.isArray(toolInput.segments) ? toolInput.segments : []), ...segments];
+    next.segments = [...own, ...segments];
     delete next.human_ms;
     delete next.ai_ms;
   }
   if (usage.length > 0) next.model_usage = usage;
   return next;
+}
+
+/** The key of the story a work_* call names, active or parked, or null. */
+function namedKey(state, toolInput) {
+  return namesClaimedStory(state, toolInput) ? state.story.key : heldNamed(state, toolInput);
 }
 
 /**
@@ -269,8 +418,13 @@ export function deliveryReminder(state, toolName, toolInput, now, source) {
   if (next.segments !== toolInput.segments) add.segments = next.segments;
   if (next.model_usage !== toolInput.model_usage) add.model_usage = next.model_usage;
   const drop = ['human_ms', 'ai_ms'].filter((field) => field in toolInput && !(field in next));
+  const key = namedKey(state, toolInput);
+  const others = otherStoriesSeqs(state, key);
+  const foreign = Array.isArray(toolInput.segments) && toolInput.segments.some((segment) => others.has(segment?.seq));
   return [
-    `holycode-hub: this call leaves out the effort measured on ${state.story.key}. Call it again with these fields added`,
+    foreign
+      ? `holycode-hub: this call carries effort measured on another story, not ${key}. Call it again with segments replaced by`
+      : `holycode-hub: this call leaves out the effort measured on ${key}. Call it again with these fields added`,
     drop.length > 0 ? ` and without ${drop.join(' / ')}` : '',
     ` (counts and timestamps only): ${JSON.stringify(add)}`,
   ].join('');
@@ -281,13 +435,15 @@ export function deliveryReminder(state, toolName, toolInput, now, source) {
  * to completion), as a short note for the developer — or null when everything went along.
  */
 export function undeliveredNote(state, toolInput, source) {
-  if (!namesClaimedStory(state, toolInput)) return null;
+  const key = namedKey(state, toolInput);
+  if (key === null) return null;
+  const parked = key === state.story?.key ? null : state.held[key];
   const sent = sentSeqs(toolInput);
-  const segments = state.pending.filter((segment) => !sent.has(segment.seq)).length;
-  const usage = Array.isArray(toolInput?.model_usage) && toolInput.model_usage.length > 0 ? 0 : usageReport(state, source).length;
+  const segments = (parked?.pending ?? state.pending).filter((segment) => !sent.has(segment.seq)).length;
+  const usage = Array.isArray(toolInput?.model_usage) && toolInput.model_usage.length > 0 ? 0 : usageOf(parked?.messages ?? state.usage.messages, source).length;
   if (segments === 0 && usage === 0) return null;
   const what = [segments > 0 ? `${segments} measured time segment${segments === 1 ? '' : 's'}` : null, usage > 0 ? 'the token counts' : null].filter(Boolean).join(' and ');
-  return `holycode-hub: ${state.story.key} was completed without ${what}; the Hub accepts them only up to completion, so they are not recorded.`;
+  return `holycode-hub: ${key} was completed without ${what}; the Hub accepts them only up to completion, so they are not recorded.`;
 }
 
 // ---- model usage (HH-171) ----------------------------------------------------------------------
@@ -326,10 +482,15 @@ export function usageSource(env) {
   return typeof env.ANTHROPIC_API_KEY === 'string' && env.ANTHROPIC_API_KEY !== '' ? 'API_KEY' : 'SUBSCRIPTION';
 }
 
-/** The `model_usage` report: per model, the attempt's cumulative counts (one request per message). */
+/** The `model_usage` report: per model, the active attempt's cumulative counts (one request per message). */
 export function usageReport(state, source) {
+  return usageOf(state.usage.messages, source);
+}
+
+/** The `model_usage` report of one story's messages (active or parked, HH-290). */
+function usageOf(messages, source) {
   const byModel = new Map();
-  for (const [model, input, output, cacheCreation, cacheRead] of Object.values(state.usage.messages)) {
+  for (const [model, input, output, cacheCreation, cacheRead] of Object.values(messages)) {
     const total = byModel.get(model) ?? { model, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, source };
     total.input_tokens += input;
     total.output_tokens += output;

@@ -13,6 +13,15 @@ export type EffortState = {
   usage: { messages: Record<string, UsageCounts>; transcripts: Record<string, number>; transcript: string | null };
   /** HH-199 — the delivering tools refused once for missing effort (reset by a successful work_* call). */
   reminded?: Record<string, boolean>;
+  /** HH-290 — the stories held but not measured right now, by key, each with its own pending segments and usage. */
+  held: Record<string, ParkedStory>;
+};
+export type ParkedStory = {
+  story: NonNullable<EffortState['story']>;
+  step: EffortCategory;
+  pending: EffortSegment[];
+  messages: Record<string, UsageCounts>;
+  parkedAt: number;
 };
 export type HookEvent = {
   hook_event_name: string;
@@ -44,6 +53,8 @@ export const TRANSCRIPT_READ_MAX_BYTES: number;
 export function emptyState(): EffortState;
 export function stepForTool(toolName: string, toolInput: unknown, currentStep: EffortCategory): EffortCategory | null;
 export function applyEvent(state: EffortState, event: HookEvent, now: number): void;
+/** HH-290 — the parked story whose worktree a tool input names, or null. */
+export function worktreeStoryOf(state: EffortState, toolInput: unknown): string | null;
 export function take(state: EffortState, now: number): EffortSegment[];
 export function usageOfLine(line: string, since: number): { id: string; counts: UsageCounts } | null;
 export function absorbTranscript(state: EffortState, lines: readonly string[]): void;
