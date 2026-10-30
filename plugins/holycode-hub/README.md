@@ -140,11 +140,14 @@ protected-content registry: what the Hub refuses to send, the client must not sh
 
 ## Pointing at another Hub
 
-The bundled entry targets production. For localhost or staging, register the server yourself
-under the same name in the project (for example
-`claude mcp add --transport http holycode-hub http://localhost:3000/mcp`) and confirm with
-`/mcp` that the intended URL is the one in use. The pointer file's `**Hub URL:**` line is
-informational — the connected server decides where calls go.
+The bundled server (`plugin:holycode-hub:holycode-hub`) is fixed to production. For localhost
+or staging, add your own `holycode-hub` server in that directory (for example
+`claude mcp add --transport http --scope local holycode-hub http://localhost:3000/mcp`) **and**
+disable the plugin's server for that directory in `/mcp`. Adding a server does not replace the
+bundled one, so with both connected a call can still reach production. Confirm in `/mcp` that
+only the intended URL is connected. The pointer file's `**Hub URL:**` line is informational —
+the connected server decides where calls go. Step-by-step, including how to switch back:
+[`docs/ONBOARDING-STAGING.md`](../../docs/ONBOARDING-STAGING.md) → Part B, Step 2.
 
 ## Tests
 
