@@ -6,7 +6,8 @@ export type UsageCounts = [model: string, input: number, output: number, cacheCr
 export type EffortState = {
   story: { key: string; id?: string | null; leaseExpiresAt: number; claimedAt?: number } | null;
   step: EffortCategory;
-  open: { actor: EffortActor; category: EffortCategory; since: number } | null;
+  /** HH-292 — `until` caps AI time that runs only while background work does. */
+  open: { actor: EffortActor; category: EffortCategory; since: number; until?: number } | null;
   seq: number;
   pending: EffortSegment[];
   /** HH-171 — per message id its model and counts; read offsets per transcript; the session transcript. */
@@ -15,6 +16,8 @@ export type EffortState = {
   reminded?: Record<string, boolean>;
   /** HH-290 — the stories held but not measured right now, by key, each with its own pending segments and usage. */
   held: Record<string, ParkedStory>;
+  /** HH-292 — the start times of background commands / agents still working (nothing else about them). */
+  background: number[];
 };
 export type ParkedStory = {
   story: NonNullable<EffortState['story']>;
@@ -30,6 +33,8 @@ export type HookEvent = {
   tool_name?: string;
   tool_input?: unknown;
   tool_response?: unknown;
+  /** UserPromptSubmit only — read to tell a task notification from a typed prompt, never stored. */
+  prompt?: string;
   /** HH-199 — set by the CLI when the work_* call failed (it delivered nothing). */
   tool_failed?: boolean;
 };
@@ -50,7 +55,10 @@ export const MIN_SEGMENT_MS: number;
 export const USAGE_COUNT_MAX: number;
 export const USAGE_MODELS_MAX: number;
 export const TRANSCRIPT_READ_MAX_BYTES: number;
+export const BACKGROUND_CAP_MS: number;
 export function emptyState(): EffortState;
+/** HH-292 — whether a shell command runs tests / lint / typecheck / audit (not a word in a path). */
+export function runsChecks(command: string): boolean;
 export function stepForTool(toolName: string, toolInput: unknown, currentStep: EffortCategory): EffortCategory | null;
 export function applyEvent(state: EffortState, event: HookEvent, now: number): void;
 /** HH-290 — the parked story whose worktree a tool input names, or null. */

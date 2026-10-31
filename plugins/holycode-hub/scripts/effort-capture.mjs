@@ -7,9 +7,16 @@
 //   human time runs from a stop to the next prompt, CAPPED at an idle threshold (away time is not
 //              counted);
 //   category   is the active Hub step, set from the tools the agent uses: work_claim / plan mode →
-//              PLANNING, ExitPlanMode or the first edit → IMPLEMENTATION, work_verify or a
-//              test/lint/typecheck command → REVIEW_GATES, project_question_add → WAITING_ON_ANSWER.
-//              A step change splits the open interval.
+//              PLANNING, ExitPlanMode or the first edit → IMPLEMENTATION, work_verify or a command
+//              that RUNS tests / lint / typecheck / audit → REVIEW_GATES (HH-292: the executed runner
+//              or package script, in each segment of a chain — never a word in a path or argument),
+//              project_question_add → WAITING_ON_ANSWER. A step change splits the open interval.
+//
+// Background work (HH-292): a Bash command or agent started with run_in_background is still working
+// after the agent stops, so that stop opens AI time, not human time, up to BACKGROUND_CAP_MS after the
+// latest one started. The agent turn that follows without a user prompt (a task notification) is one
+// of them reporting back; a real user prompt ends them all, and an unreported one is forgotten after
+// the cap. The buffer holds only their start times.
 //
 // The buffer lives OUTSIDE the repository (~/.holycode-hub/effort/<hash of the project dir>.json),
 // survives a restart, and holds ONLY timestamps, actor and category — never prompt text, tool input,
@@ -67,11 +74,27 @@ export const TRANSCRIPT_READ_MAX_BYTES = 32 * 1024 * 1024;
 /** A model id the Hub accepts (HH-170); anything else (e.g. "<synthetic>") is not a model call. */
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}$/;
 
-const TEST_COMMAND = /\b(test|tests|vitest|jest|playwright|pytest|lint|eslint|tsc|typecheck|go test|cargo test)\b/;
+/** Background work (HH-292) counts as AI time after a stop for at most this long, and is forgotten after it. */
+export const BACKGROUND_CAP_MS = 30 * 60 * 1000;
+/** At most this many outstanding background tasks are remembered. */
+const BACKGROUND_MAX = 20;
+
+/** A package script that runs checks: `test`, `test:coverage`, `lint`, `typecheck`, `audit`, … */
+const CHECK_SCRIPT = /^(test|tests|lint|typecheck|type-check|check-types|audit)(:[\w:.-]+)?$/;
+/** A runner binary that runs checks on its own, or with the named sub-command. */
+const CHECK_BINARY = new Set(['vitest', 'jest', 'mocha', 'pytest', 'eslint']);
+const CHECK_SUBCOMMAND = new Set(['playwright test', 'go test', 'go vet', 'cargo test', 'cargo clippy', 'flutter test', 'flutter analyze', 'dart analyze']);
+/** Package runners whose next word is a script or a binary; their flags that take a value. */
+const PACKAGE_RUNNER = new Set(['pnpm', 'npm', 'yarn', 'bun', 'npx', 'pnpx', 'bunx', 'turbo']);
+const RUNNER_VERB = new Set(['run', 'exec', 'dlx', 'x', 'run-script']);
+const RUNNER_VALUE_FLAG = new Set(['--filter', '-F', '-C', '--dir', '--prefix', '--workspace']);
+/** Words that only wrap the command they precede. */
+const WRAPPER = new Set(['env', 'time', 'nice', 'nohup', 'sudo', 'exec', 'command', 'timeout']);
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** A fresh, story-less state. */
 export function emptyState() {
-  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {}, held: {} };
+  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {}, held: {}, background: [] };
 }
 
 /** The active story ends: its fields reset; the seq counter, the parked stories and the transcript offsets stay. */
@@ -87,19 +110,20 @@ function emptyUsage() {
 
 const iso = (ms) => new Date(ms).toISOString();
 
-/** Closes the open interval at `at` into a pending segment (human time capped). */
+/** Closes the open interval at `at` into a pending segment (human time and background AI time capped). */
 function closeOpen(state, at) {
   const open = state.open;
   state.open = null;
   if (open === null) return;
-  const end = open.actor === 'HUMAN' ? Math.min(at, open.since + IDLE_CAP_MS) : at;
+  const end = open.actor === 'HUMAN' ? Math.min(at, open.since + IDLE_CAP_MS) : Math.min(at, open.until ?? at);
   if (end - open.since < MIN_SEGMENT_MS) return;
   state.seq += 1;
   state.pending.push({ seq: state.seq, actor: open.actor, category: open.category, started_at: iso(open.since), ended_at: iso(end) });
 }
 
-function openInterval(state, actor, at) {
-  state.open = { actor, category: state.step, since: at };
+/** Opens an interval; `until` marks AI time that runs only while background work does (HH-292). */
+function openInterval(state, actor, at, until) {
+  state.open = until === undefined ? { actor, category: state.step, since: at } : { actor, category: state.step, since: at, until };
 }
 
 /** Drops each story whose lease has expired, active or parked — the Hub would refuse its segments. */
@@ -107,6 +131,36 @@ function expireIfDue(state, now) {
   state.held = state.held ?? {};
   for (const [key, slot] of Object.entries(state.held)) if (now > slot.story.leaseExpiresAt) delete state.held[key];
   if (state.story !== null && now > state.story.leaseExpiresAt) clearActive(state);
+  state.background = (state.background ?? []).filter((startedAt) => now - startedAt <= BACKGROUND_CAP_MS);
+}
+
+// ---- background work (HH-292) ------------------------------------------------------------------
+
+/** Remembers a Bash command or agent started in the background (its start time only). */
+function trackBackground(state, tool, toolInput, now) {
+  if (!['Bash', 'Agent', 'Task'].includes(tool) || toolInput?.run_in_background !== true) return;
+  state.background = [...state.background, now].slice(-BACKGROUND_MAX);
+}
+
+/**
+ * The agent works again after a stop that left background work running: without a user prompt, that is
+ * one background task reporting back — it is forgotten, and the agent's turn goes on as plain AI time
+ * (past the cap, the uncounted gap is cut out).
+ */
+function resumeFromBackground(state, event, now) {
+  if (state.open?.until === undefined || event.hook_event_name === 'SessionEnd' || typedPrompt(event)) return;
+  state.background = state.background.slice(1);
+  if (now <= state.open.until) {
+    delete state.open.until;
+    return;
+  }
+  closeOpen(state, now);
+  openInterval(state, 'AI', now);
+}
+
+/** A prompt the developer typed — not the task notification the harness submits when background work finishes. */
+function typedPrompt(event) {
+  return event.hook_event_name === 'UserPromptSubmit' && !(typeof event.prompt === 'string' && event.prompt.trimStart().startsWith('<task-notification>'));
 }
 
 // ---- several stories (HH-290) ------------------------------------------------------------------
@@ -174,18 +228,47 @@ export function stepForTool(toolName, toolInput, currentStep) {
   if (/__work_verify$/.test(toolName)) return 'REVIEW_GATES';
   if (/__project_question_add$/.test(toolName)) return 'WAITING_ON_ANSWER';
   if (toolName === 'ExitPlanMode') return 'IMPLEMENTATION';
-  if (toolName === 'Bash' && TEST_COMMAND.test(String(toolInput?.command ?? ''))) return 'REVIEW_GATES';
+  if (toolName === 'Bash' && runsChecks(String(toolInput?.command ?? ''))) return 'REVIEW_GATES';
   if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(toolName)) return 'IMPLEMENTATION';
   return currentStep === 'WAITING_ON_ANSWER' && toolName === 'Bash' ? 'IMPLEMENTATION' : null;
+}
+
+/**
+ * Whether a shell command RUNS tests / lint / typecheck / audit (HH-292): some segment of its `&&` /
+ * `;` / `|` chain executes a check runner or a check package script — after any `cd` / `source`
+ * segment, env assignments and wrappers. A word in a path or argument (`cat a.test.ts`) never counts.
+ */
+export function runsChecks(command) {
+  return command.split(/[;&|\n]+/).some((segment) => runsCheck(segment.replace(/[(){}]/g, ' ').split(/\s+/).filter(Boolean)));
+}
+
+/** Whether one simple command (its words) runs a check. */
+function runsCheck(words) {
+  let i = 0;
+  while (i < words.length && (ENV_ASSIGNMENT.test(words[i]) || WRAPPER.has(words[i]) || /^\d+[smhd]?$/.test(words[i]))) i += 1;
+  const binary = path.basename(words[i] ?? '');
+  if (PACKAGE_RUNNER.has(binary)) {
+    const script = scriptWords(words.slice(i + 1));
+    return CHECK_SCRIPT.test(script[0] ?? '') || runsCheck(script);
+  }
+  if (binary === 'tsc') return words.includes('--noEmit');
+  return CHECK_BINARY.has(binary) || CHECK_SUBCOMMAND.has(`${binary} ${words[i + 1]}`);
+}
+
+/** The words after a package runner, from the script or binary it runs (flags and `run` / `exec` skipped). */
+function scriptWords(words) {
+  let i = 0;
+  while (i < words.length && (words[i].startsWith('-') || RUNNER_VERB.has(words[i]))) i += RUNNER_VALUE_FLAG.has(words[i]) ? 2 : 1;
+  return words.slice(i);
 }
 
 /** Sets the step; an open interval in another category is split at `now`. */
 function setStep(state, step, now) {
   if (step === null || step === state.step) return;
-  const actor = state.open?.actor ?? null;
+  const open = state.open;
   closeOpen(state, now);
   state.step = step;
-  if (actor !== null) openInterval(state, actor, now);
+  if (open !== null) openInterval(state, open.actor, now, open.until);
 }
 
 /**
@@ -259,6 +342,7 @@ export function applyEvent(state, event, now) {
   if (typeof event.transcript_path === 'string') state.usage.transcript = event.transcript_path;
   const name = event.hook_event_name;
   const tool = String(event.tool_name ?? '');
+  resumeFromBackground(state, event, now);
   if (name === 'PostToolUse' && /__work_claim$/.test(tool) && event.tool_failed !== true) {
     const claim = claimOf(event.tool_input, event.tool_response, now);
     if (claim !== null) {
@@ -275,12 +359,20 @@ export function applyEvent(state, event, now) {
     if (worktree !== null) switchTo(state, worktree, now);
   }
   if (state.story === null) return;
-  if (name === 'UserPromptSubmit') {
+  if (typedPrompt(event)) {
     closeOpen(state, now);
+    state.background = [];
     openInterval(state, 'AI', now);
+  } else if (name === 'UserPromptSubmit') {
+    if (state.open?.actor !== 'AI') {
+      closeOpen(state, now);
+      openInterval(state, 'AI', now);
+    }
   } else if (name === 'Stop') {
     closeOpen(state, now);
-    openInterval(state, 'HUMAN', now);
+    // HH-292 — background work the agent started is still running: the stop is not human time yet.
+    if (state.background.length > 0) openInterval(state, 'AI', now, Math.max(...state.background) + BACKGROUND_CAP_MS);
+    else openInterval(state, 'HUMAN', now);
   } else if (name === 'SessionEnd') {
     closeOpen(state, now);
   } else if (name === 'PreToolUse' && tool === 'AskUserQuestion') {
@@ -293,6 +385,7 @@ export function applyEvent(state, event, now) {
     }
     // HH-199 — a call the Hub refused delivered nothing: the buffer stays for the retry.
     if (event.tool_failed !== true) applyWorkCall(state, tool, event.tool_input, now);
+    trackBackground(state, tool, event.tool_input, now);
     setStep(state, stepForTool(tool, event.tool_input, state.step), now);
   }
 }
@@ -331,9 +424,9 @@ function applyWorkCall(state, tool, toolInput, now) {
 export function take(state, now) {
   expireIfDue(state, now);
   if (state.open !== null) {
-    const actor = state.open.actor;
+    const { actor, until } = state.open;
     closeOpen(state, now);
-    openInterval(state, actor, now);
+    openInterval(state, actor, now, until);
   }
   return state.pending;
 }
