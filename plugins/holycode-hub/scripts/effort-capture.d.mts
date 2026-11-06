@@ -38,7 +38,7 @@ export type HookEvent = {
   /** HH-199 — set by the CLI when the work_* call failed (it delivered nothing). */
   tool_failed?: boolean;
 };
-export type ModelUsageSource = 'API_KEY' | 'SUBSCRIPTION';
+export type ModelUsageSource = 'API_KEY' | 'SUBSCRIPTION' | 'BEDROCK' | 'VERTEX' | 'FOUNDRY' | 'GATEWAY' | 'UNKNOWN';
 export type ModelUsage = {
   model: string;
   input_tokens: number;
@@ -66,7 +66,12 @@ export function worktreeStoryOf(state: EffortState, toolInput: unknown): string 
 export function take(state: EffortState, now: number): EffortSegment[];
 export function usageOfLine(line: string, since: number): { id: string; counts: UsageCounts } | null;
 export function absorbTranscript(state: EffortState, lines: readonly string[]): void;
-export function usageSource(env: Record<string, string | undefined>): ModelUsageSource;
+export interface ClaudeAccount {
+  billingType: string | null;
+  organizationType: string | null;
+}
+export function usageSource(env: Record<string, string | undefined>, account?: ClaudeAccount | null): ModelUsageSource;
+export function readClaudeAccount(env: Record<string, string | undefined>, home?: string): ClaudeAccount | null;
 export function usageReport(state: EffortState, source: ModelUsageSource): ModelUsage[];
 export function readNewTranscriptLines(state: EffortState, file: string): string[];
 export function projectRootFor(dir: string): string;

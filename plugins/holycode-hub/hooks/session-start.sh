@@ -8,7 +8,9 @@
 #        valid pointer       -> linked project id + Hub URL
 #        no pointer file     -> "no Hub project in this directory — run /holycode-hub:init"
 #        pointer without id  -> "pointer file is invalid — re-run /holycode-hub:init"
-#   3. when linked: a refresh warning if the repo's AGENTS.md Hub block is older
+#   3. when linked: the project-rules line (HH-399) — the agent reads every
+#      .project-management/rules/*.md before implementing; they win over Hub guidance;
+#   4. when linked: a refresh warning if the repo's AGENTS.md Hub block is older
 #      than (or missing next to) the block this plugin ships. The version is the
 #      `<!-- holycode-hub:block-version: N -->` marker; an unversioned block = v1.
 #
@@ -36,6 +38,20 @@ block_version() {
   grep -qF "$START_MARKER" "$1" 2>/dev/null || return 0
   v=$(sed -n 's/^<!-- holycode-hub:block-version: \([0-9][0-9]*\) -->.*$/\1/p' "$1" 2>/dev/null | head -n 1)
   echo "${v:-1}"
+}
+
+# HH-399 — names the project's own rules so every session (claimed or not) loads them.
+print_project_rules() {
+  names=""
+  for f in "${PWD}/.project-management/rules/"*.md; do
+    [ -f "$f" ] || continue
+    names="${names:+${names}, }$(basename "$f")"
+  done
+  if [ -n "$names" ]; then
+    echo "holycode-hub: project rules in .project-management/rules/ (${names}) — read every file before implementing; on a conflict they win over Hub guidance"
+  else
+    echo "holycode-hub: no project rules in .project-management/rules/ yet — a claim delivers them once the team syncs some"
+  fi
 }
 
 warn_if_block_stale() {
@@ -66,5 +82,6 @@ if [ -z "$PROJECT_ID" ]; then
 fi
 
 echo "holycode-hub: linked to project ${PROJECT_ID} at ${HUB_URL:-<hub-url>}"
+print_project_rules
 warn_if_block_stale
 exit 0

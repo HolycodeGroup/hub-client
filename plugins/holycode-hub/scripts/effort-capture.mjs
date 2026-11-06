@@ -570,9 +570,47 @@ export function absorbTranscript(state, lines) {
   }
 }
 
-/** How the member pays for the model: an API key in the environment is per token, else a subscription. */
-export function usageSource(env) {
-  return typeof env.ANTHROPIC_API_KEY === 'string' && env.ANTHROPIC_API_KEY !== '' ? 'API_KEY' : 'SUBSCRIPTION';
+const isSet = (value) => typeof value === 'string' && value.trim() !== '';
+const isOn = (value) => isSet(value) && !['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
+
+/**
+ * HH-396 — how the member pays for the model, from the same settings Claude Code itself reads: a cloud
+ * provider flag (Bedrock, Vertex, Foundry), a gateway (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`),
+ * an API key, else the signed-in account Claude Code recorded — a claude.ai subscription is SUBSCRIPTION,
+ * any other signed-in account (a Console login) is billed per token. Nothing known → UNKNOWN, never a guess.
+ * `account` is Claude Code's `oauthAccount` record (only `billingType` and `organizationType` are read).
+ */
+export function usageSource(env, account = null) {
+  if (isOn(env.CLAUDE_CODE_USE_BEDROCK)) return 'BEDROCK';
+  if (isOn(env.CLAUDE_CODE_USE_VERTEX)) return 'VERTEX';
+  if (isOn(env.CLAUDE_CODE_USE_FOUNDRY)) return 'FOUNDRY';
+  if (isSet(env.ANTHROPIC_BASE_URL) || isSet(env.ANTHROPIC_AUTH_TOKEN)) return 'GATEWAY';
+  if (isSet(env.ANTHROPIC_API_KEY)) return 'API_KEY';
+  if (account === null || typeof account !== 'object') return 'UNKNOWN';
+  const billing = typeof account.billingType === 'string' ? account.billingType.toLowerCase() : '';
+  const orgType = typeof account.organizationType === 'string' ? account.organizationType.toLowerCase() : '';
+  if (billing.includes('subscription') || orgType.startsWith('claude_')) return 'SUBSCRIPTION';
+  return billing !== '' || orgType !== '' ? 'API_KEY' : 'UNKNOWN';
+}
+
+/**
+ * Reads Claude Code's signed-in account record (`<CLAUDE_CONFIG_DIR or ~>/.claude.json` → `oauthAccount`),
+ * keeping only the two billing fields; null when absent or unreadable. Never sent anywhere.
+ */
+export function readClaudeAccount(env, home = homedir()) {
+  try {
+    const file = path.join(isSet(env.CLAUDE_CONFIG_DIR) ? env.CLAUDE_CONFIG_DIR : home, '.claude.json');
+    const account = JSON.parse(readFileSync(file, 'utf8'))?.oauthAccount;
+    if (account === null || typeof account !== 'object') return null;
+    return { billingType: account.billingType ?? null, organizationType: account.organizationType ?? null };
+  } catch {
+    return null;
+  }
+}
+
+/** The source for this process: its environment plus the signed-in account. */
+function currentSource() {
+  return usageSource(process.env, readClaudeAccount(process.env));
 }
 
 /** The `model_usage` report: per model, the active attempt's cumulative counts (one request per message). */
@@ -687,7 +725,7 @@ function failed(response) {
 function attachOutput(state, event, now) {
   absorbSessionTranscript(state);
   const tool = String(event.tool_name);
-  const reason = deliveryReminder(state, tool, event.tool_input ?? {}, now, usageSource(process.env));
+  const reason = deliveryReminder(state, tool, event.tool_input ?? {}, now, currentSource());
   if (reason === null) return '';
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
 }
@@ -706,7 +744,7 @@ function main(argv, stdin, now) {
       event.tool_failed = true;
     } else if (event.hook_event_name === 'PostToolUse' && /__work_complete$/.test(tool)) {
       absorbSessionTranscript(state);
-      const note = undeliveredNote(state, event.tool_input, usageSource(process.env));
+      const note = undeliveredNote(state, event.tool_input, currentSource());
       if (note !== null) out = JSON.stringify({ systemMessage: note });
     }
     applyEvent(state, event, now);
@@ -727,7 +765,7 @@ function main(argv, stdin, now) {
     expireIfDue(state, now);
     absorbSessionTranscript(state);
     saveState(file, state);
-    return JSON.stringify(usageReport(state, usageSource(process.env)));
+    return JSON.stringify(usageReport(state, currentSource()));
   }
   return '';
 }

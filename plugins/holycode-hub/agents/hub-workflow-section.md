@@ -1,5 +1,5 @@
 <!-- holycode-hub:start -->
-<!-- holycode-hub:block-version: 3 -->
+<!-- holycode-hub:block-version: 4 -->
 ## Holycode Hub workflow
 
 This repository is linked to a Holycode Hub project — the Hub holds the backlog, estimates and
@@ -10,9 +10,12 @@ Work loop (one story at a time), via the `holycode-hub` MCP server:
 
 1. **Claim**: `work_claim { project_id, story_id }` — returns the story, acceptance criteria,
    gate criteria, an 8-hour lease, and rule/command deltas.
-2. **Implement locally** — code never leaves this machine.
-3. **Verify**: `work_verify { project_id, story_id, evidence }` — the Hub adjudicates the gate.
-4. **Complete**: `work_complete { project_id, story_id, commit_sha }` — or `work_release` to
+2. **Read the project rules** — every Markdown file in `.project-management/rules/` (the claim's
+   `directive.project_rules` lists the ones the Hub holds). Apply them while implementing and
+   verifying; on a conflict the project rules win over Hub guidance.
+3. **Implement locally** — code never leaves this machine.
+4. **Verify**: `work_verify { project_id, story_id, evidence }` — the Hub adjudicates the gate.
+5. **Complete**: `work_complete { project_id, story_id, commit_sha }` — or `work_release` to
    return the story to the pool.
 
 Project status: `project_status { project_id }`.
@@ -26,8 +29,9 @@ run `/holycode-hub:update`, then restart Claude Code. Give no other update steps
 
 ### Git conventions (apply from the very first commit)
 
-The Hub delivers full rules per claim, but the pointer + `AGENTS.md` commit happens before
-any claim — so these always-on conventions apply immediately:
+A claim delivers the story, the Hub's guidance checklists, the project's own rules and the
+command cards; the framework's own rules never leave the Hub. The pointer + `AGENTS.md` commit
+happens before any claim — so these always-on conventions apply immediately:
 
 - **Conventional commit** subjects (`feat:`, `fix:`, `docs:`, `chore:` …), imperative, ≤ 72 chars.
 - **NO AI credits** — never add `Co-Authored-By: <AI>` or "Generated with …" trailers.
