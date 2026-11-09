@@ -13,6 +13,12 @@
 #   4. when linked: a refresh warning if the repo's AGENTS.md Hub block is older
 #      than (or missing next to) the block this plugin ships. The version is the
 #      `<!-- holycode-hub:block-version: N -->` marker; an unversioned block = v1.
+#   5. HH-448, ONCE per install of plugin 0.46.0: the one last Hub sign-in. 0.46.0
+#      dropped the version header from the plugin's MCP config, so the update to it
+#      changes the hash Claude Code keys the sign-in on one final time. The update
+#      itself runs the OLD plugin's code, so this is the first new code to run. A
+#      marker in the plugin's own install directory (HOLYCODE_HUB_STATE_DIR in
+#      tests) keeps it to one session.
 #
 # Invariants (tested in __tests__/session-start.test.ts):
 #   - NEVER makes a network call (plain file reads + sed; no HTTP/socket tools)
@@ -21,6 +27,9 @@
 POINTER="${PWD}/.project-management/hub-pointer.md"
 REPO_AGENTS="${PWD}/AGENTS.md"
 PLUGIN_BLOCK="$(dirname "$0")/../agents/hub-workflow-section.md"
+PLUGIN_MANIFEST="$(dirname "$0")/../.claude-plugin/plugin.json"
+STATE_DIR="${HOLYCODE_HUB_STATE_DIR:-$(dirname "$0")/..}"
+SIGNIN_NOTE_VERSION='0.46.0'
 START_MARKER='<!-- holycode-hub:start -->'
 
 print_conventions() {
@@ -66,7 +75,20 @@ warn_if_block_stale() {
   return 0
 }
 
+# HH-448 — said once on the 0.46.0 install, linked or not: the sign-in prompt comes with the first
+# Hub call of the session, so the note lands just before it.
+note_last_signin_once() {
+  version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([0-9.]*\)".*$/\1/p' "$PLUGIN_MANIFEST" 2>/dev/null | head -n 1)
+  [ "$version" = "$SIGNIN_NOTE_VERSION" ] || return 0
+  marker="${STATE_DIR}/.signin-note-shown"
+  [ -e "$marker" ] && return 0
+  echo "holycode-hub: plugin ${SIGNIN_NOTE_VERSION} keeps one MCP config across releases — Claude Code may ask you to sign in to the Hub one last time after this update; later updates keep your sign-in. Tell the developer this once."
+  : > "$marker" 2>/dev/null || true
+  return 0
+}
+
 print_conventions
+note_last_signin_once
 
 if [ ! -f "$POINTER" ]; then
   echo "holycode-hub: no Hub project in this directory — run /holycode-hub:init"
