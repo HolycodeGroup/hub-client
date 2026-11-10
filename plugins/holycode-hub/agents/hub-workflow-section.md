@@ -1,5 +1,5 @@
 <!-- holycode-hub:start -->
-<!-- holycode-hub:block-version: 4 -->
+<!-- holycode-hub:block-version: 5 -->
 ## Holycode Hub workflow
 
 This repository is linked to a Holycode Hub project — the Hub holds the backlog, estimates and
@@ -26,6 +26,16 @@ Agents with the Holycode Hub plugin (Claude Code) use the slash commands instead
 **Outdated plugin:** when any Hub result carries `client_outdated`, tell the developer the plugin
 is outdated — installed `client_outdated.installed`, published `client_outdated.published` — and to
 run `/holycode-hub:update`, then restart Claude Code. Give no other update steps.
+
+### Code review findings
+
+Projects with Holycode Code Review can turn findings into tickets and back. Read findings with
+`project_code_review_findings` (it returns the ticket instructions too); draft tickets by those
+instructions and confirm them with the developer before `project_code_review_tickets_add`. A claimed
+code-review story names its finding (`story.code_review`): read the code at that location, then either
+fix it (verify, complete) or, when it is not a real problem, close it with `work_close` and an honest
+resolution and reason — never close a story just to clear the backlog. Claude Code users also have
+`/holycode-hub:code-review-tickets` and `/holycode-hub:close`.
 
 ### Git conventions (apply from the very first commit)
 
