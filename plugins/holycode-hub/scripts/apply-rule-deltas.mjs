@@ -25,7 +25,8 @@
 // returns).
 //
 // Invariants (tested in __tests__/apply-rule-deltas.test.ts):
-//   - a project delta path must be `.project-management/rules/<flat name>.md`
+//   - a project delta path must be `.project-management/rules/<flat name>.md` (or a repository's
+//     own `stack-adapter.<name>.md`, HH-480)
 //     AND resolve inside that directory under the project root, and its sha256
 //     must be the sha256 of its body — else REFUSED (nothing written);
 //   - a project file whose CURRENT sha256 is neither the recorded one nor the
@@ -42,7 +43,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-const RULE_PATH = /^[A-Za-z0-9][A-Za-z0-9-]*\.md$/;
+// A flat name, or a repository's own stack adapter `stack-adapter.<name>.md` (HH-480).
+const RULE_PATH = /^(?:[A-Za-z0-9][A-Za-z0-9-]*|stack-adapter\.[a-z0-9][a-z0-9-]{0,62})\.md$/;
 /** The project tier's home inside the customer repo (US-019). */
 const PROJECT_RULES_DIR = '.project-management/rules/';
 const VERSIONS_FILE = '.versions.json';
