@@ -10,12 +10,16 @@
 //           that already has a worktree (a re-claim) gets the same one back with a fresh lease.
 //           HH-245 — `--group LEAD` joins the worktree and branch of story LEAD instead: a parallel
 //           run keeps stories that depend on each other or share files in one group, one branch, one PR.
+//           HH-679 — `--tool claude-code|pi` names the calling client: when the other client has a
+//           live session in the worktree, the result carries its `warning` (tool-sessions.mjs).
 //   remove  --key K   removes the worktree once its branch is pushed (nothing unpushed) or merged
 //                     into the default branch, and it holds no uncommitted change; the branch stays.
 //                     A group's worktree stays while another story of the group still uses it.
 //   check             lists story worktrees whose lease has expired — never touches them.
 //   keep    --key K   the developer chose to keep an expired story's branch: the worktree goes, the
 //                     branch and its commits stay; refused while the worktree has uncommitted changes.
+//   busy    --key K --tool T   (HH-679, read only) `{ warning }` when the other client has a live
+//                     session in the story's recorded worktree, else `{}` — run before a claim.
 //   hook              (PostToolUse) a work_* call renews the recorded lease of its story's worktree.
 //
 // The registry lives in the repository's git directory (`<git-common-dir>/holycode-hub/worktrees.json`)
@@ -26,6 +30,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+
+import { folderWarning } from './tool-sessions.mjs';
 
 /** A lease the Hub granted lasts 8 h and is renewed by every work_* call on the story. */
 export const LEASE_TTL_MS = 8 * 60 * 60 * 1000;
@@ -100,10 +106,18 @@ function defaultBase(cwd) {
 
 /**
  * Creates (or, on a re-claim, returns) the story's worktree; with `group`, joins that story's (HH-245).
+ * With `tool`, a successful result carries `warning` while the other client works in it (HH-679).
  *
- * @returns {{ ok: true, path: string, branch: string, reused: boolean, group?: string } | { ok: false, reason: string }}
+ * @returns {{ ok: true, path: string, branch: string, reused: boolean, group?: string, warning?: string } | { ok: false, reason: string }}
  */
-export function create(cwd, { key, title, type = 'feat', limit = null, expires = null, group = null }, now = Date.now()) {
+export function create(cwd, options, now = Date.now()) {
+  const result = createWorktree(cwd, options, now);
+  if (!result.ok || options.tool === undefined || options.tool === null) return result;
+  const warning = folderWarning(result.path, options.tool, { now });
+  return warning === null ? result : { ...result, warning };
+}
+
+function createWorktree(cwd, { key, title, type = 'feat', limit = null, expires = null, group = null }, now) {
   const { main, registryFile } = repoOf(cwd);
   const registry = loadRegistry(registryFile);
   const leaseExpiresAt = expires === null ? now + LEASE_TTL_MS : Date.parse(expires);
@@ -209,6 +223,14 @@ export function check(cwd, now = Date.now()) {
     .map(([key, entry]) => ({ key, path: entry.path, branch: entry.branch, expiredAt: new Date(entry.leaseExpiresAt).toISOString() }));
 }
 
+/** HH-679 — the other client's live session in the story's recorded worktree, read only: `{ warning? }`. */
+export function busy(cwd, key, tool, now = Date.now()) {
+  const entry = loadRegistry(repoOf(cwd).registryFile)[key];
+  if (entry === undefined || !existsSync(entry.path)) return {};
+  const warning = folderWarning(entry.path, tool, { now });
+  return warning === null ? {} : { warning };
+}
+
 /** PostToolUse: a successful work_* call on a story renews its recorded lease. */
 export function applyHook(cwd, event, now = Date.now()) {
   const tool = String(event.tool_name ?? '');
@@ -241,6 +263,7 @@ function main(argv, stdin, cwd) {
         limit: args.limit === undefined || args.limit === 'null' ? null : Number(args.limit),
         expires: args.expires ?? null,
         group: args.group ?? null,
+        tool: args.tool ?? null,
       });
     case 'remove':
       return remove(cwd, args.key);
@@ -248,6 +271,8 @@ function main(argv, stdin, cwd) {
       return keep(cwd, args.key);
     case 'check':
       return check(cwd);
+    case 'busy':
+      return busy(cwd, args.key, args.tool);
     case 'hook': {
       const event = JSON.parse(stdin || '{}');
       applyHook(event.cwd ?? cwd, event);

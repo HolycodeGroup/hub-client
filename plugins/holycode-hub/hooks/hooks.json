@@ -1,5 +1,5 @@
 {
-  "description": "Session-start convenience check (git conventions, Hub link state, stale AGENTS.md block) and effort capture (HH-133): timestamps of prompts, stops, tool steps and session end on the claimed story, buffered locally as human/AI segments — timestamps, actor and category only. Never a network call, never blocks the session. HH-199: before a work_progress / work_verify / work_complete call for the claimed story that leaves out the measured effort, it refuses that call once with the exact fields to add (never approving or widening a permission), and after a work_complete it says so when measured effort was still left behind. Story worktrees (HH-90): a work_claim / work_progress / work_verify call renews the recorded lease of its story's worktree.",
+  "description": "Session-start convenience check (git conventions, Hub link state, stale AGENTS.md block) and effort capture (HH-133): timestamps of prompts, stops, tool steps and session end on the claimed story, buffered locally as human/AI segments — timestamps, actor and category only. Never a network call, never blocks the session. HH-199: before a work_progress / work_verify / work_complete call for the claimed story that leaves out the measured effort, it refuses that call once with the exact fields to add (never approving or widening a permission), and after a work_complete it says so when measured effort was still left behind. Story worktrees (HH-90): a work_claim / work_progress / work_verify call renews the recorded lease of its story's worktree. Switching between Claude Code and Pi (HH-679, HH-680): a session marker per running session in the repository's git directory (tool, process id, host, start and heartbeat times only), written at session start, refreshed by prompts, turns and tool steps and removed at session end; the session start warns when Pi works in the same folder or uses another Hub for this repository (only the Hub URL is recorded, locally). Effort from another clone (HH-681): a story's measured effort that is still unsent when its lease runs out here is kept for 7 days, and each session start asks the agent to send pending effort with one quiet work_progress call per story (the hook itself makes no network call). Nothing else of it leaves the machine.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,28 +8,33 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
             "timeout": 5
-          }
+          },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/tool-sessions.mjs\" hook --tool claude-code --mcp-config \"${CLAUDE_PLUGIN_ROOT}/.mcp.json\"", "timeout": 5 },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/tool-sessions.mjs\" hook --tool claude-code", "timeout": 5 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/tool-sessions.mjs\" hook --tool claude-code", "timeout": 5 }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/tool-sessions.mjs\" hook --tool claude-code", "timeout": 5 }
         ]
       }
     ],
@@ -51,7 +56,8 @@
       {
         "matcher": ".*",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/effort-capture.mjs\" hook", "timeout": 5 },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/tool-sessions.mjs\" hook --tool claude-code", "timeout": 5 }
         ]
       },
       {

@@ -18,6 +18,22 @@ export type EffortState = {
   held: Record<string, ParkedStory>;
   /** HH-292 — the start times of background commands / agents still working (nothing else about them). */
   background: number[];
+  /** HH-681 — effort of stories whose lease view ran out here, still to be sent at a session start, by key. */
+  unsent?: Record<string, UnsentStory>;
+};
+export type UnsentStory = {
+  story: { key: string; id: string | null };
+  pending: EffortSegment[];
+  messages: Record<string, UsageCounts>;
+  /** When the lease view ran out (kept for UNSENT_KEEP_MS from then). */
+  since: number;
+  /** Failed sends so far (dropped at UNSENT_FAILURES_MAX). */
+  failures: number;
+};
+/** HH-681 — one session-start work_progress call (without project_id). */
+export type SessionStartSend = {
+  key: string;
+  input: { story_id: string; segments?: EffortSegment[]; model_usage?: ModelUsage[] };
 };
 export type ParkedStory = {
   story: NonNullable<EffortState['story']>;
@@ -56,6 +72,15 @@ export const USAGE_COUNT_MAX: number;
 export const USAGE_MODELS_MAX: number;
 export const TRANSCRIPT_READ_MAX_BYTES: number;
 export const BACKGROUND_CAP_MS: number;
+export const UNSENT_KEEP_MS: number;
+export const UNSENT_FAILURES_MAX: number;
+export const SEND_SEGMENTS_MAX: number;
+/** HH-681 — the work_progress calls a session start asks for: one per story with pending effort. */
+export function sessionStartSends(state: EffortState, now: number, source: ModelUsageSource): SessionStartSend[];
+/** HH-681 — the project id of a project root's Hub pointer, or null. */
+export function pointerProjectId(root: string): string | null;
+/** HH-681 — the agent's session-start instruction for the sends, or null when there is nothing to send. */
+export function sessionStartNote(sends: readonly SessionStartSend[], projectId: string | null): string | null;
 export function emptyState(): EffortState;
 /** HH-292 — whether a shell command runs tests / lint / typecheck / audit (not a word in a path). */
 export function runsChecks(command: string): boolean;

@@ -48,12 +48,24 @@
 // the active story. The stories a standing order hands out are held from its claim on. A work_* call
 // delivers the effort of the story it names — active or parked — and never another story's segments.
 //
+// Effort from another clone (HH-681): each clone or computer keeps its own buffer, so when a story is
+// completed from one, the other still holds that story's measured time. When a story's lease view runs
+// out here, its pending segments and usage are kept as UNSENT (`unsent`, by story key) for
+// UNSENT_KEEP_MS instead of being dropped. At session start the hook hands the agent one work_progress
+// call per story with pending effort — unsent, held or active — to make quietly (Claude Code hooks
+// cannot call the Hub themselves, so the call is the agent's; it shows nothing unless it fails). The
+// Hub accepts it from the story's completer for 7 days and merges it by time, so a repeat is harmless.
+// A sent story leaves `unsent`; a refusal (another person's story, past the window, a bad segment)
+// drops it quietly, and so does the third failed attempt; "not completed yet" (FORBIDDEN_CLAIM) keeps
+// it for a later session start. A new claim of an unsent story takes its
+// time back into the story.
+//
 // CLI: `effort-capture.mjs hook` (reads the hook event JSON on stdin) · `effort-capture.mjs take`
 // (prints the pending segments as a JSON array for the work_* call; `[]` when none) ·
 // `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none).
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -73,6 +85,13 @@ export const USAGE_MODELS_MAX = 20;
 export const TRANSCRIPT_READ_MAX_BYTES = 32 * 1024 * 1024;
 /** A model id the Hub accepts (HH-170); anything else (e.g. "<synthetic>") is not a model call. */
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}$/;
+
+/** HH-681 — unsent effort of a story whose lease view ran out is kept this long for a session-start send. */
+export const UNSENT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+/** HH-681 — an unsent story is dropped after this many failed sends (a refusal drops it at once). */
+export const UNSENT_FAILURES_MAX = 3;
+/** HH-681 — the most segments one work_progress call carries (the Hub's batch limit). */
+export const SEND_SEGMENTS_MAX = 200;
 
 /** Background work (HH-292) counts as AI time after a stop for at most this long, and is forgotten after it. */
 export const BACKGROUND_CAP_MS = 30 * 60 * 1000;
@@ -94,7 +113,7 @@ const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** A fresh, story-less state. */
 export function emptyState() {
-  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {}, held: {}, background: [] };
+  return { story: null, step: 'PLANNING', open: null, seq: 0, pending: [], usage: emptyUsage(), reminded: {}, held: {}, background: [], unsent: {} };
 }
 
 /** The active story ends: its fields reset; the seq counter, the parked stories and the transcript offsets stay. */
@@ -126,12 +145,129 @@ function openInterval(state, actor, at, until) {
   state.open = until === undefined ? { actor, category: state.step, since: at } : { actor, category: state.step, since: at, until };
 }
 
-/** Drops each story whose lease has expired, active or parked — the Hub would refuse its segments. */
+/**
+ * Ends each story whose lease view has run out, active or parked: its pending effort is kept as unsent
+ * (HH-681 — the story may have been completed from another clone, and the Hub accepts its completer's
+ * late effort); unsent effort older than UNSENT_KEEP_MS is dropped.
+ */
 function expireIfDue(state, now) {
   state.held = state.held ?? {};
-  for (const [key, slot] of Object.entries(state.held)) if (now > slot.story.leaseExpiresAt) delete state.held[key];
-  if (state.story !== null && now > state.story.leaseExpiresAt) clearActive(state);
+  state.unsent = state.unsent ?? {};
+  for (const [key, slot] of Object.entries(state.held)) {
+    if (now <= slot.story.leaseExpiresAt) continue;
+    keepUnsent(state, slot.story, slot.pending, slot.messages, now);
+    delete state.held[key];
+  }
+  if (state.story !== null && now > state.story.leaseExpiresAt) {
+    keepUnsent(state, state.story, state.pending, state.usage.messages, now);
+    clearActive(state);
+  }
+  for (const [key, slot] of Object.entries(state.unsent)) if (now - slot.since > UNSENT_KEEP_MS) delete state.unsent[key];
   state.background = (state.background ?? []).filter((startedAt) => now - startedAt <= BACKGROUND_CAP_MS);
+}
+
+// ---- effort from another clone (HH-681) ---------------------------------------------------------
+
+/** Keeps a story's pending segments and usage as unsent (merged with any already kept). */
+function keepUnsent(state, story, pending, messages, now) {
+  if (pending.length === 0 && Object.keys(messages ?? {}).length === 0) return;
+  const prior = state.unsent[story.key];
+  state.unsent[story.key] = {
+    story: { key: story.key, id: story.id ?? prior?.story.id ?? null },
+    pending: [...(prior?.pending ?? []), ...pending],
+    messages: { ...(prior?.messages ?? {}), ...messages },
+    since: prior?.since ?? now, // the keep runs from the FIRST time the story became unsent
+    failures: 0,
+  };
+}
+
+/** Takes a story's unsent effort back into the slot that measures it again (a new claim of it). */
+function reclaimUnsent(state, key, slot) {
+  const unsent = state.unsent?.[key];
+  if (unsent === undefined) return;
+  slot.pending.push(...unsent.pending);
+  Object.assign(slot.messages, unsent.messages);
+  delete state.unsent[key];
+}
+
+/** The unsent story a work_* call names (by key or id), or null. */
+function unsentNamed(state, toolInput) {
+  const named = toolInput?.story_id;
+  if (typeof named !== 'string') return null;
+  return Object.keys(state.unsent ?? {}).find((key) => key === named || state.unsent[key].story.id === named) ?? null;
+}
+
+/** A response the Hub refused for good: a typed refusal or its wording — sending it again cannot help. */
+function refusedForGood(response) {
+  const text = typeof response === 'string' ? response : JSON.stringify(response ?? '');
+  return /(FORBIDDEN|VALIDATION|CONFLICT|NOT_FOUND)_[A-Z_]+|accepted only from the person who completed it|No live claim|Resource not accessible|segments\[\d+\]/.test(text);
+}
+
+/** The story is not completed yet (no lease, no completion) or held by someone: worth asking again later. */
+function notCompletedYet(response) {
+  const text = typeof response === 'string' ? response : JSON.stringify(response ?? '');
+  return /FORBIDDEN_CLAIM|No live claim|CONFLICT_CLAIM_HELD/.test(text);
+}
+
+/**
+ * A work_progress for an unsent story finished: what it carried is sent; a refusal drops the story —
+ * except "not completed yet" (the other clone may still complete it), which keeps it for a later
+ * session start until UNSENT_KEEP_MS runs out.
+ */
+function applyUnsentSend(state, key, event) {
+  const slot = state.unsent[key];
+  if (event.tool_failed === true && notCompletedYet(event.tool_response)) return;
+  if (event.tool_failed === true) {
+    slot.failures = (slot.failures ?? 0) + 1;
+    if (refusedForGood(event.tool_response) || slot.failures >= UNSENT_FAILURES_MAX) delete state.unsent[key];
+    return;
+  }
+  const sent = sentSeqs(event.tool_input);
+  slot.pending = slot.pending.filter((s) => !sent.has(s.seq));
+  if (Array.isArray(event.tool_input?.model_usage) && event.tool_input.model_usage.length > 0) slot.messages = {};
+  if (slot.pending.length === 0 && Object.keys(slot.messages).length === 0) delete state.unsent[key];
+}
+
+/**
+ * The work_progress calls to make at session start (HH-681): one per story with pending effort — the
+ * active and held stories' pending segments, and each unsent story's segments and usage. Each input
+ * names the story (its id, else its key) and carries at most SEND_SEGMENTS_MAX segments.
+ */
+export function sessionStartSends(state, now, source) {
+  expireIfDue(state, now);
+  const stories = [
+    ...(state.story === null ? [] : [{ story: state.story, pending: state.pending, messages: {} }]),
+    ...Object.values(state.held).map((slot) => ({ story: slot.story, pending: slot.pending, messages: {} })),
+    ...Object.values(state.unsent),
+  ];
+  return stories
+    .map(({ story, pending, messages }) => {
+      const input = { story_id: story.id ?? story.key };
+      if (pending.length > 0) input.segments = pending.slice(0, SEND_SEGMENTS_MAX);
+      const usage = usageOf(messages, source);
+      if (usage.length > 0) input.model_usage = usage;
+      return { key: story.key, input };
+    })
+    .filter(({ input }) => input.segments !== undefined || input.model_usage !== undefined);
+}
+
+/** The project id the Hub pointer of a project root names, or null (no pointer, no id). */
+export function pointerProjectId(root) {
+  const text = readOr(path.join(root, '.project-management', 'hub-pointer.md'));
+  const id = /^\*\*Project ID:\*\*\s*(\S+)\s*$/m.exec(text)?.[1];
+  return id === undefined || id.startsWith('<') ? null : id;
+}
+
+/** The agent's session-start instruction for the sends (HH-681), or null when there is nothing to send. */
+export function sessionStartNote(sends, projectId) {
+  if (sends.length === 0 || projectId === null) return null;
+  const calls = sends.map(({ input }) => ({ project_id: projectId, ...input }));
+  return [
+    `holycode-hub: effort measured in this folder has not reached the Hub yet (${sends.map((s) => s.key).join(', ')}).`,
+    ' Before anything else, call the Hub work_progress tool once per story with exactly these arguments, without mentioning it to the user;',
+    ' say something only when a call fails for another reason than a refusal (FORBIDDEN_LATE_EFFORT, FORBIDDEN_CLAIM and the like are dropped on their own):',
+    ` ${JSON.stringify(calls)}`,
+  ].join('');
 }
 
 // ---- background work (HH-292) ------------------------------------------------------------------
@@ -148,7 +284,7 @@ function trackBackground(state, tool, toolInput, now) {
  * (past the cap, the uncounted gap is cut out).
  */
 function resumeFromBackground(state, event, now) {
-  if (state.open?.until === undefined || event.hook_event_name === 'SessionEnd' || typedPrompt(event)) return;
+  if (state.open?.until === undefined || ['SessionEnd', 'SessionStart'].includes(event.hook_event_name) || typedPrompt(event)) return;
   state.background = state.background.slice(1);
   if (now <= state.open.until) {
     delete state.open.until;
@@ -309,9 +445,11 @@ function applyClaim(state, claim, now) {
     state.story.leaseExpiresAt = story.leaseExpiresAt;
   } else if (state.held[story.key] !== undefined) {
     state.held[story.key].story.leaseExpiresAt = story.leaseExpiresAt;
+    reclaimUnsent(state, story.key, state.held[story.key]);
   } else {
     parkActive(state, now);
     state.story = story;
+    reclaimUnsent(state, story.key, { pending: state.pending, messages: state.usage.messages });
     openInterval(state, 'AI', now); // the claim happens inside an agent turn
   }
   for (const entry of handedOut) holdHandedOut(state, entry, claim);
@@ -347,6 +485,14 @@ export function applyEvent(state, event, now) {
     const claim = claimOf(event.tool_input, event.tool_response, now);
     if (claim !== null) {
       applyClaim(state, claim, now);
+      return;
+    }
+  }
+  // HH-681 — the session-start send of a story's unsent effort (a story no longer measured here).
+  if (name === 'PostToolUse' && /__work_progress$/.test(tool) && !namesClaimedStory(state, event.tool_input) && heldNamed(state, event.tool_input) === null) {
+    const unsent = unsentNamed(state, event.tool_input);
+    if (unsent !== null) {
+      applyUnsentSend(state, unsent, event);
       return;
     }
   }
@@ -708,17 +854,33 @@ function readOr(file) {
   }
 }
 
+/**
+ * HH-679 — both clients (Claude Code hooks, the Pi extension) write the one buffer of a project, so it
+ * is written atomically: a temp file unique to this write, then a rename. A reader sees the old buffer
+ * or the new one, never half of either; a failed write leaves no temp file behind.
+ */
 export function saveState(file, state) {
   mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state));
-  renameSync(tmp, file);
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(state));
+    renameSync(tmp, file);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /** A tool response that reports a failure (a refused work_complete leaves the buffer for a retry). */
 function failed(response) {
   const value = typeof response === 'string' ? safeJson(response) ?? response : response;
   return value?.isError === true || /"code"\s*:\s*"(VALIDATION|FORBIDDEN|CONFLICT|BUSINESS|NOT_FOUND)_/.test(JSON.stringify(value ?? ''));
+}
+
+/** HH-681 — the SessionStart answer: the quiet work_progress sends as context for the agent (empty: none). */
+function sessionStartOutput(state, cwd, now) {
+  const note = sessionStartNote(sessionStartSends(state, now, currentSource()), pointerProjectId(projectRootFor(cwd)));
+  return note === null ? '' : JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } });
 }
 
 /** The PreToolUse answer for a delivering call (empty: run it untouched). */
@@ -749,6 +911,7 @@ function main(argv, stdin, now) {
     }
     applyEvent(state, event, now);
     if (event.hook_event_name === 'Stop' || event.hook_event_name === 'SessionEnd') absorbSessionTranscript(state);
+    if (event.hook_event_name === 'SessionStart') out = sessionStartOutput(state, event.cwd ?? process.cwd(), now);
     saveState(file, state);
     return out;
   }
