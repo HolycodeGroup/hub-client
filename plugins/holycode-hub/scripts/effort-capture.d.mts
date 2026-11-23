@@ -11,7 +11,8 @@ export type EffortState = {
   seq: number;
   pending: EffortSegment[];
   /** HH-171 — per message id its model and counts; read offsets per transcript; the session transcript. */
-  usage: { messages: Record<string, UsageCounts>; transcripts: Record<string, number>; transcript: string | null };
+  /** HH-593 — `model`: the model of the session's latest assistant message, kept with or without a claim. */
+  usage: { messages: Record<string, UsageCounts>; transcripts: Record<string, number>; transcript: string | null; model?: string };
   /** HH-199 — the delivering tools refused once for missing effort (reset by a successful work_* call). */
   reminded?: Record<string, boolean>;
   /** HH-290 — the stories held but not measured right now, by key, each with its own pending segments and usage. */
@@ -98,6 +99,11 @@ export interface ClaudeAccount {
 export function usageSource(env: Record<string, string | undefined>, account?: ClaudeAccount | null): ModelUsageSource;
 export function readClaudeAccount(env: Record<string, string | undefined>, home?: string): ClaudeAccount | null;
 export function usageReport(state: EffortState, source: ModelUsageSource): ModelUsage[];
+export const MODEL_TAIL_MAX_BYTES: number;
+export function latestModelOf(lines: readonly string[]): string | null;
+export function latestTranscriptModel(file: unknown): string | null;
+export function noteModel(state: EffortState, model: unknown): void;
+export function modelReport(model: unknown, source: ModelUsageSource): ModelUsage[];
 export function readNewTranscriptLines(state: EffortState, file: string): string[];
 export function projectRootFor(dir: string): string;
 export function stateFileFor(projectDir: string, baseDir?: string): string;

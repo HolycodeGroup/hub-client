@@ -60,9 +60,17 @@
 // it for a later session start. A new claim of an unsent story takes its
 // time back into the story.
 //
+// The model without a claim (HH-593): project_reverse_engineer and project_adopt run without a claimed
+// story, so `usage` prints `[]` there. `model` reads the model of the session's latest assistant
+// message (the tail of the transcript the hooks recorded — only the `model` field) and prints it as
+// one `model_usage` entry with zero counts: the plan run then records at least which model produced
+// it. It never sends the claimed story's counts, which belong to that story, not to the plan run, and
+// never a model stored earlier: when the transcript names none it prints `[]`.
+//
 // CLI: `effort-capture.mjs hook` (reads the hook event JSON on stdin) · `effort-capture.mjs take`
 // (prints the pending segments as a JSON array for the work_* call; `[]` when none) ·
-// `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none).
+// `effort-capture.mjs usage` (prints the model usage as a JSON array for `model_usage`; `[]` when none) ·
+// `effort-capture.mjs model` (prints the model in use as a one-entry `model_usage` array; `[]` when unknown).
 import { Buffer } from 'node:buffer';
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -83,6 +91,8 @@ export const USAGE_COUNT_MAX = 2_000_000_000;
 export const USAGE_MODELS_MAX = 20;
 /** At most this many new transcript bytes are read per hook run — the rest waits for the next one. */
 export const TRANSCRIPT_READ_MAX_BYTES = 32 * 1024 * 1024;
+/** HH-593 — at most this many bytes from a transcript's end are read to find the model in use. */
+export const MODEL_TAIL_MAX_BYTES = 256 * 1024;
 /** A model id the Hub accepts (HH-170); anything else (e.g. "<synthetic>") is not a model call. */
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}$/;
 
@@ -783,6 +793,53 @@ function usageOf(messages, source) {
     .map((t) => ({ ...t, input_tokens: clamp(t.input_tokens), output_tokens: clamp(t.output_tokens), cache_creation_tokens: clamp(t.cache_creation_tokens), cache_read_tokens: clamp(t.cache_read_tokens), requests: clamp(t.requests) }));
 }
 
+// ---- the model in use without a claim (HH-593) ------------------------------------------------
+
+/** The model of the latest assistant message among `lines` (only the `model` field is read), or null. */
+export function latestModelOf(lines) {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const entry = safeJson(lines[i]);
+    const model = entry?.type === 'assistant' ? entry.message?.model : undefined;
+    if (typeof model === 'string' && MODEL_ID.test(model)) return model;
+  }
+  return null;
+}
+
+/** The latest model a transcript names, from its last MODEL_TAIL_MAX_BYTES; null when none or unreadable. */
+export function latestTranscriptModel(file) {
+  if (typeof file !== 'string') return null;
+  let fd = null;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const from = Math.max(0, size - MODEL_TAIL_MAX_BYTES);
+    const buffer = Buffer.alloc(size - from);
+    readSync(fd, buffer, 0, buffer.length, from);
+    const lines = buffer.toString('utf8').split('\n');
+    // A tail that starts mid-file starts mid-line: that first piece is not a whole line.
+    return latestModelOf(from > 0 ? lines.slice(1) : lines);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/** Keeps the model in use — with or without a claim — when it is one the Hub accepts (the Pi client's record). */
+export function noteModel(state, model) {
+  if (typeof model === 'string' && MODEL_ID.test(model)) state.usage.model = model;
+}
+
+/**
+ * The `model_usage` of a call made without a claimed story (project_reverse_engineer, project_adopt):
+ * `model` — the model the current session answered with — with zero counts, or `[]` when it is unknown.
+ * Never a stored model of an earlier session: a plan is never attributed to a model that did not make it.
+ */
+export function modelReport(model, source) {
+  if (typeof model !== 'string' || !MODEL_ID.test(model)) return [];
+  return [{ model, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, source }];
+}
+
 /**
  * The complete lines a transcript gained since the last read (the stored offset moves past them; a
  * trailing partial line waits). A shorter file than the offset was replaced: it is read from the start.
@@ -930,6 +987,11 @@ function main(argv, stdin, now) {
     saveState(file, state);
     return JSON.stringify(usageReport(state, currentSource()));
   }
+  if (command === 'model') {
+    // Only this session's transcript names the model: nothing stored is reused (HH-593).
+    const state = loadState(stateFileFor(process.cwd()));
+    return JSON.stringify(modelReport(latestTranscriptModel(state.usage.transcript), currentSource()));
+  }
   return '';
 }
 
@@ -939,6 +1001,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     const stdin = process.argv[2] === 'hook' ? readFileSync(0, 'utf8') : '';
     process.stdout.write(main(process.argv.slice(2), stdin, Date.now()));
   } catch {
-    if (process.argv[2] === 'take' || process.argv[2] === 'usage') process.stdout.write('[]');
+    if (['take', 'usage', 'model'].includes(process.argv[2])) process.stdout.write('[]');
   }
 }
